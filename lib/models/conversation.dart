@@ -30,12 +30,36 @@ class Conversation {
   }
 }
 
+/// A single tool invocation surfaced live during agent streaming.
+class ToolActivity {
+  final String name;
+  bool running;
+  double? durationMs;
+
+  ToolActivity({required this.name, this.running = true, this.durationMs});
+}
+
+/// Agent-orchestration activity attached to a streaming assistant message:
+/// the planner's steps and the tools it ran. Mutable so the provider can update
+/// it in place as WebSocket events arrive.
+class AgentActivity {
+  List<String> planSteps;
+  final List<ToolActivity> tools;
+
+  AgentActivity({List<String>? planSteps, List<ToolActivity>? tools})
+      : planSteps = planSteps ?? [],
+        tools = tools ?? [];
+
+  bool get isEmpty => planSteps.isEmpty && tools.isEmpty;
+}
+
 class Message {
   final String role;
   final String content;
   final String? model;
   final String? platform;
   final bool isStreaming;
+  final AgentActivity? activity;
 
   Message({
     required this.role,
@@ -43,6 +67,7 @@ class Message {
     this.model,
     this.platform,
     this.isStreaming = false,
+    this.activity,
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
@@ -67,6 +92,7 @@ class Message {
     String? model,
     String? platform,
     bool? isStreaming,
+    AgentActivity? activity,
   }) {
     return Message(
       role: role ?? this.role,
@@ -74,6 +100,7 @@ class Message {
       model: model ?? this.model,
       platform: platform ?? this.platform,
       isStreaming: isStreaming ?? this.isStreaming,
+      activity: activity ?? this.activity,
     );
   }
 }

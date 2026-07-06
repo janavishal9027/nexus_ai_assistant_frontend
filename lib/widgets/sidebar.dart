@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/conversation.dart';
 import '../providers/chat_provider.dart';
+import '../providers/auth_provider.dart';
 
 /// Expanded sidebar (260px): brand + collapse button, New chat / Search chats
 /// actions, and the conversation list.
@@ -73,7 +74,7 @@ class _SidebarState extends State<Sidebar> {
                     size: 18, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
                 Text(
-                  'ChatApp',
+                  'Nexus AI',
                   style: theme.textTheme.titleSmall
                       ?.copyWith(fontWeight: FontWeight.bold),
                 ),
@@ -158,6 +159,64 @@ class _SidebarState extends State<Sidebar> {
                     },
                   ),
           ),
+          // Account + logout
+          Builder(builder: (context) {
+            final acct = context.watch<AuthProvider>().account;
+            final initial = (acct != null && acct.displayName.isNotEmpty)
+                ? acct.displayName[0].toUpperCase()
+                : '?';
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 12,
+                      backgroundColor: theme.colorScheme.primary.withValues(alpha: 0.15),
+                      child: Text(initial,
+                          style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: theme.colorScheme.primary)),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(acct?.displayName ?? 'Account',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall
+                                  ?.copyWith(fontWeight: FontWeight.w600)),
+                          if (acct?.email != null)
+                            Text(acct!.email,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                    fontSize: 10,
+                                    color: theme.colorScheme.onSurface
+                                        .withValues(alpha: 0.5))),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.logout, size: 16),
+                      tooltip: 'Log out',
+                      onPressed: () {
+                        context.read<ChatProvider>().reset();
+                        context.read<AuthProvider>().logout();
+                        _afterNav();
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
+          Divider(height: 1, color: theme.colorScheme.outline.withValues(alpha: 0.2)),
           // Footer
           Padding(
             padding: const EdgeInsets.all(12),
@@ -170,7 +229,7 @@ class _SidebarState extends State<Sidebar> {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  'ChatApp',
+                  'Nexus AI',
                   style: theme.textTheme.bodySmall?.copyWith(
                     fontWeight: FontWeight.w600,
                     color: theme.colorScheme.primary,

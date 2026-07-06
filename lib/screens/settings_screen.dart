@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/chat_provider.dart';
+import '../providers/auth_provider.dart';
 import '../services/api_service.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -47,6 +48,71 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // Account
+          _buildSection(
+            theme,
+            title: 'Account',
+            icon: Icons.account_circle_outlined,
+            children: [
+              Builder(builder: (context) {
+                final acct = context.watch<AuthProvider>().account;
+                return Row(
+                  children: [
+                    Icon(Icons.person_outline, size: 18,
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(acct?.displayName ?? 'Account',
+                              style: theme.textTheme.bodyMedium
+                                  ?.copyWith(fontWeight: FontWeight.w600)),
+                          if (acct?.email != null)
+                            Text(acct!.email,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                    color: theme.colorScheme.onSurface
+                                        .withValues(alpha: 0.6))),
+                        ],
+                      ),
+                    ),
+                  ],
+                );
+              }),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.lock_reset, size: 16),
+                    label: const Text('Change password'),
+                    onPressed: _showChangePasswordDialog,
+                  ),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.logout, size: 16),
+                    label: const Text('Log out'),
+                    onPressed: () {
+                      final navigator = Navigator.of(context);
+                      context.read<ChatProvider>().reset();
+                      context.read<AuthProvider>().logout();
+                      navigator.pop();
+                    },
+                  ),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.delete_forever, size: 16),
+                    label: const Text('Delete account'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: theme.colorScheme.error,
+                      side: BorderSide(color: theme.colorScheme.error.withValues(alpha: 0.5)),
+                    ),
+                    onPressed: _showDeleteAccountDialog,
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
           // Server URL
           _buildSection(
             theme,
@@ -108,7 +174,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Add keys from OpenRouter, Groq, NVIDIA, HuggingFace, or Google',
+                        'Add LLM keys (OpenRouter, Groq, NVIDIA, HuggingFace, Google) '
+                        'or a Tavily key for web search',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurface.withValues(alpha: 0.4),
                         ),
@@ -145,7 +212,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             icon: Icons.info_outline,
             children: [
               Text(
-                'ChatApp uses a fallback routing system inspired by FreeLLMAPI. '
+                'Nexus AI uses a fallback routing system inspired by FreeLLMAPI. '
                 'When a model reaches its rate limit, the system automatically '
                 'tries the next available free model — ensuring you always get a response.',
                 style: theme.textTheme.bodySmall?.copyWith(
@@ -286,6 +353,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         icon = Icons.auto_awesome;
         color = Colors.lightBlue;
         break;
+      case 'tavily':
+        icon = Icons.travel_explore;
+        color = Colors.teal;
+        break;
       default:
         icon = Icons.api;
         color = Colors.grey;
@@ -348,66 +419,243 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _showAddKeyDialog() {
     final providers = context.read<ChatProvider>().providers;
-    String selectedPlatform = providers.isNotEmpty ? providers[0]['id'] : 'openrouter';
+    // LLM providers from config, plus non-LLM keys the app supports
+    // (Tavily powers the web-search tool — provided here, not in the backend).
+    final options = <Map<String, String>>[
+      for (final p in providers)
+        {'id': p['id']?.toString() ?? '', 'name': p['name']?.toString() ?? ''},
+      {'id': 'tavily', 'name': 'Tavily (Web Search)'},
+    ];
+    String selectedPlatform = options.first['id']!;
     final keyController = TextEditingController();
     final labelController = TextEditingController();
 
+    bool submitting = false;
+
     showDialog(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Add API Key'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            DropdownButtonFormField<String>(
-              value: selectedPlatform,
-              items: providers.map((p) => DropdownMenuItem(
-                value: p['id']?.toString() ?? '',
-                child: Text(p['name']?.toString() ?? ''),
-              )).toList(),
-              onChanged: (v) => selectedPlatform = v!,
-              decoration: const InputDecoration(labelText: 'Provider'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: keyController,
-              decoration: const InputDecoration(
-                labelText: 'API Key',
-                hintText: 'sk-...',
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Add API Key'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<String>(
+                value: selectedPlatform,
+                items: options.map((o) => DropdownMenuItem(
+                  value: o['id'],
+                  child: Text(o['name'] ?? ''),
+                )).toList(),
+                // Rebuild the dialog so the picked provider is actually shown.
+                onChanged: (v) => setDialogState(() => selectedPlatform = v!),
+                decoration: const InputDecoration(labelText: 'Provider'),
               ),
-              obscureText: true,
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: labelController,
-              decoration: const InputDecoration(
-                labelText: 'Label (optional)',
-                hintText: 'My key',
+              const SizedBox(height: 12),
+              TextField(
+                controller: keyController,
+                decoration: const InputDecoration(
+                  labelText: 'API Key',
+                  hintText: 'sk-...',
+                ),
+                obscureText: true,
               ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: labelController,
+                decoration: const InputDecoration(
+                  labelText: 'Label (optional)',
+                  hintText: 'My key',
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: submitting
+                  ? null
+                  : () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: submitting
+                  ? null
+                  : () async {
+                      if (keyController.text.trim().isEmpty) return;
+                      // Capture before the await so we don't use a BuildContext
+                      // across the async gap.
+                      final messenger = ScaffoldMessenger.of(this.context);
+                      final navigator = Navigator.of(dialogContext);
+                      setDialogState(() => submitting = true);
+                      try {
+                        await ApiService.addKey(
+                          selectedPlatform,
+                          keyController.text.trim(),
+                          label: labelController.text.trim().isNotEmpty
+                              ? labelController.text.trim()
+                              : null,
+                        );
+                        navigator.pop();
+                        messenger.showSnackBar(
+                          SnackBar(
+                            content: Text(
+                                '${selectedPlatform.toUpperCase()} key added'),
+                          ),
+                        );
+                        _loadKeys();
+                      } catch (e) {
+                        setDialogState(() => submitting = false);
+                        messenger.showSnackBar(
+                          SnackBar(
+                            backgroundColor: Colors.red,
+                            content: Text(
+                                'Could not add key: ${e.toString().replaceFirst('Exception: ', '')}'),
+                          ),
+                        );
+                      }
+                    },
+              child: submitting
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Add'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
+      ),
+    );
+  }
+
+  void _showChangePasswordDialog() {
+    final currentCtrl = TextEditingController();
+    final newCtrl = TextEditingController();
+    final confirmCtrl = TextEditingController();
+    bool submitting = false;
+    String? error;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Change password'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: currentCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Current password'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: newCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'New password (min 6)'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: confirmCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Confirm new password'),
+              ),
+              if (error != null) ...[
+                const SizedBox(height: 10),
+                Text(error!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+              ],
+            ],
           ),
-          FilledButton(
-            onPressed: () async {
-              if (keyController.text.trim().isEmpty) return;
-              await ApiService.addKey(
-                selectedPlatform,
-                keyController.text.trim(),
-                label: labelController.text.trim().isNotEmpty
-                    ? labelController.text.trim()
-                    : null,
-              );
-              if (dialogContext.mounted) Navigator.of(dialogContext).pop();
-              _loadKeys();
-            },
-            child: const Text('Add'),
+          actions: [
+            TextButton(
+              onPressed: submitting ? null : () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: submitting
+                  ? null
+                  : () async {
+                      if (newCtrl.text.length < 6) {
+                        setDialogState(() => error = 'New password must be at least 6 characters');
+                        return;
+                      }
+                      if (newCtrl.text != confirmCtrl.text) {
+                        setDialogState(() => error = 'Passwords do not match');
+                        return;
+                      }
+                      final messenger = ScaffoldMessenger.of(this.context);
+                      final navigator = Navigator.of(dialogContext);
+                      setDialogState(() {
+                        submitting = true;
+                        error = null;
+                      });
+                      try {
+                        await ApiService.changePassword(currentCtrl.text, newCtrl.text);
+                        navigator.pop();
+                        messenger.showSnackBar(const SnackBar(content: Text('Password updated')));
+                      } catch (e) {
+                        setDialogState(() {
+                          submitting = false;
+                          error = e.toString().replaceFirst('Exception: ', '');
+                        });
+                      }
+                    },
+              child: submitting
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('Update'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showDeleteAccountDialog() {
+    bool submitting = false;
+    showDialog(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Delete account'),
+          content: const Text(
+            'This permanently deletes your account, all your conversations, and your '
+            'private API keys. This cannot be undone.',
           ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: submitting ? null : () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: submitting
+                  ? null
+                  : () async {
+                      final messenger = ScaffoldMessenger.of(this.context);
+                      final settingsNavigator = Navigator.of(this.context);
+                      final auth = this.context.read<AuthProvider>();
+                      final chat = this.context.read<ChatProvider>();
+                      setDialogState(() => submitting = true);
+                      try {
+                        await ApiService.deleteAccount();
+                        Navigator.of(dialogContext).pop();   // close dialog
+                        settingsNavigator.pop();             // close settings → back to gate
+                        chat.reset();
+                        await auth.logout();                 // gate shows the auth screen
+                      } catch (e) {
+                        setDialogState(() => submitting = false);
+                        messenger.showSnackBar(SnackBar(
+                          backgroundColor: Colors.red,
+                          content: Text('Could not delete account: '
+                              '${e.toString().replaceFirst('Exception: ', '')}'),
+                        ));
+                      }
+                    },
+              child: submitting
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('Delete'),
+            ),
+          ],
+        ),
       ),
     );
   }

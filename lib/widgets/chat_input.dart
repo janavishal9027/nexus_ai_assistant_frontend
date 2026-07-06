@@ -87,7 +87,7 @@ class _ChatInputState extends State<ChatInput> {
                   textInputAction: TextInputAction.newline,
                   style: theme.textTheme.bodyMedium,
                   decoration: const InputDecoration(
-                    hintText: 'Message ChatApp...',
+                    hintText: 'Message Nexus AI...',
                     border: InputBorder.none,
                     contentPadding: EdgeInsets.symmetric(
                       horizontal: 16,

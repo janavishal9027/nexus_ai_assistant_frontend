@@ -69,6 +69,9 @@ class MessageBubble extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // Agent activity: planner steps + live tool runs
+                  if (!isUser && message.activity != null)
+                    _AgentActivityView(activity: message.activity!),
                   // Content
                   if (message.isStreaming && message.content.isEmpty)
                     const _TypingIndicator()
@@ -363,6 +366,127 @@ class _CodeBlockState extends State<_CodeBlock> {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Renders the agent's plan steps and the tools it ran (live), shown above the
+/// assistant's answer while orchestration is in progress and after it finishes.
+class _AgentActivityView extends StatelessWidget {
+  final AgentActivity activity;
+
+  const _AgentActivityView({required this.activity});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final primary = theme.colorScheme.primary;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: primary.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: primary.withValues(alpha: 0.15)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (activity.planSteps.isNotEmpty) ...[
+            Row(
+              children: [
+                Icon(Icons.checklist_rounded, size: 14, color: primary),
+                const SizedBox(width: 6),
+                Text(
+                  'Plan',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: primary,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            for (int i = 0; i < activity.planSteps.length; i++)
+              Padding(
+                padding: const EdgeInsets.only(left: 2, bottom: 2),
+                child: Text(
+                  '${i + 1}. ${activity.planSteps[i]}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.3,
+                    color: theme.colorScheme.onSurface.withValues(alpha: 0.85),
+                  ),
+                ),
+              ),
+          ],
+          if (activity.planSteps.isNotEmpty && activity.tools.isNotEmpty)
+            const SizedBox(height: 8),
+          if (activity.tools.isNotEmpty)
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [for (final t in activity.tools) _ToolChip(tool: t)],
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ToolChip extends StatelessWidget {
+  final ToolActivity tool;
+
+  const _ToolChip({required this.tool});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final running = tool.running;
+    final color = running ? theme.colorScheme.primary : Colors.green;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (running)
+            SizedBox(
+              width: 11,
+              height: 11,
+              child: CircularProgressIndicator(strokeWidth: 1.6, color: color),
+            )
+          else
+            Icon(Icons.check_circle, size: 12, color: color),
+          const SizedBox(width: 5),
+          Text(
+            tool.name,
+            style: TextStyle(
+              fontSize: 11,
+              fontFamily: 'monospace',
+              color: theme.colorScheme.onSurface.withValues(alpha: 0.9),
+            ),
+          ),
+          if (!running && tool.durationMs != null) ...[
+            const SizedBox(width: 4),
+            Text(
+              '${tool.durationMs!.round()}ms',
+              style: TextStyle(
+                fontSize: 10,
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
+              ),
+            ),
+          ],
         ],
       ),
     );

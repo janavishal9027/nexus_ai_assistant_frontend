@@ -20,6 +20,10 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    // Load this account's config + conversations once the screen is shown.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<ChatProvider>().initialize();
+    });
   }
 
   void _scrollToBottom() {
@@ -298,7 +302,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           const SizedBox(height: 16),
           Text(
-            'ChatApp',
+            'Nexus AI',
             style: theme.textTheme.headlineSmall?.copyWith(
               fontWeight: FontWeight.bold,
             ),
