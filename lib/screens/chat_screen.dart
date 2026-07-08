@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
+import '../providers/auth_provider.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/sidebar.dart';
+import '../widgets/resize_handle.dart';
 import 'settings_screen.dart';
+import 'profile_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -17,13 +21,32 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollController = ScrollController();
   bool _sidebarOpen = true;
 
+  // Drag-resizable conversation sidebar width (persisted).
+  static const double _minSidebar = 220, _maxSidebar = 420;
+  static const String _sidebarPrefKey = 'chat_sidebar_width';
+  double _sidebarWidth = 260;
+
   @override
   void initState() {
     super.initState();
+    _loadSidebarWidth();
     // Load this account's config + conversations once the screen is shown.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) context.read<ChatProvider>().initialize();
     });
+  }
+
+  Future<void> _loadSidebarWidth() async {
+    final prefs = await SharedPreferences.getInstance();
+    final w = prefs.getDouble(_sidebarPrefKey);
+    if (w != null && mounted) {
+      setState(() => _sidebarWidth = w.clamp(_minSidebar, _maxSidebar));
+    }
+  }
+
+  Future<void> _saveSidebarWidth() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_sidebarPrefKey, _sidebarWidth);
   }
 
   void _scrollToBottom() {
@@ -46,15 +69,23 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Builder(
         builder: (scaffoldContext) => Row(
           children: [
-            // Sidebar (desktop: full panel or collapsed rail; mobile: drawer)
+            // Single left rail (Chat / Settings / Profile) on desktop.
             if (isWide)
-              _sidebarOpen
-                  ? Sidebar(
-                      onClose: () => setState(() => _sidebarOpen = false),
-                    )
-                  : CollapsedSidebar(
-                      onOpen: () => setState(() => _sidebarOpen = true),
-                    ),
+              _NavRail(onChatTap: () => setState(() => _sidebarOpen = !_sidebarOpen)),
+            // Conversation sidebar — shown when expanded. Collapsing it leaves
+            // just the single left rail (no second collapsed rail); the rail's
+            // Chat icon re-opens it. Drag the handle on its right edge to resize.
+            if (isWide && _sidebarOpen) ...[
+              Sidebar(
+                width: _sidebarWidth,
+                onClose: () => setState(() => _sidebarOpen = false),
+              ),
+              ResizeHandle(
+                onDrag: (dx) => setState(() =>
+                    _sidebarWidth = (_sidebarWidth + dx).clamp(_minSidebar, _maxSidebar)),
+                onDragEnd: _saveSidebarWidth,
+              ),
+            ],
             // Main chat area
             Expanded(
               child: _buildChatArea(scaffoldContext, isWide),
@@ -128,6 +159,9 @@ class _ChatScreenState extends State<ChatScreen> {
             _scrollToBottom();
           },
           isLoading: chatProvider.isLoading,
+          onStop: chatProvider.stopGeneration,
+          deepResearch: chatProvider.deepResearch,
+          onToggleDeepResearch: chatProvider.toggleDeepResearch,
         ),
       ],
     );
@@ -184,16 +218,18 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
             ),
-          // Settings button — always at the far right edge
-          IconButton(
-            icon: const Icon(Icons.settings_outlined, size: 20),
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const SettingsScreen()),
-              );
-            },
-            tooltip: 'Settings',
-          ),
+          // Settings — on desktop this lives in the left nav rail instead, so
+          // only show the top-bar gear on narrow (mobile) layouts.
+          if (!isWide)
+            IconButton(
+              icon: const Icon(Icons.settings_outlined, size: 20),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                );
+              },
+              tooltip: 'Settings',
+            ),
         ],
       ),
     );
@@ -394,6 +430,107 @@ class _SuggestionChip extends StatelessWidget {
               style: theme.textTheme.bodySmall,
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Slim far-left navigation rail (desktop): brand, Chat (active), Settings, and
+/// the account avatar (Profile). Keeps the conversation sidebar to its right.
+class _NavRail extends StatelessWidget {
+  final VoidCallback onChatTap;
+  const _NavRail({required this.onChatTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final acct = context.watch<AuthProvider>().account;
+    final initial = (acct != null && acct.displayName.isNotEmpty)
+        ? acct.displayName[0].toUpperCase()
+        : '?';
+
+    return Container(
+      width: 56,
+      color: isDark ? const Color(0xFF0A0A0A) : const Color(0xFFEFEFF1),
+      child: Column(
+        children: [
+          const SizedBox(height: 14),
+          Icon(Icons.auto_awesome, size: 22, color: theme.colorScheme.primary),
+          const SizedBox(height: 18),
+          _RailIcon(
+              icon: Icons.forum_outlined, tooltip: 'Chat — toggle sidebar', selected: true, onTap: onChatTap),
+          _RailIcon(
+            icon: Icons.settings_outlined,
+            tooltip: 'Settings',
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            ),
+          ),
+          const Spacer(),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 14),
+            child: Tooltip(
+              message: 'Profile',
+              child: InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ProfileScreen()),
+                ),
+                child: CircleAvatar(
+                  radius: 15,
+                  backgroundColor: theme.colorScheme.primary.withValues(alpha: 0.15),
+                  child: Text(initial,
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: theme.colorScheme.primary)),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RailIcon extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _RailIcon({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+    this.selected = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Tooltip(
+        message: tooltip,
+        child: Material(
+          color: selected ? theme.colorScheme.primary.withValues(alpha: 0.12) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Icon(icon,
+                  size: 20,
+                  color: selected
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.onSurface.withValues(alpha: 0.6)),
+            ),
+          ),
         ),
       ),
     );

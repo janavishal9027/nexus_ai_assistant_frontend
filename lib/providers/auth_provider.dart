@@ -60,6 +60,14 @@ class AuthProvider extends ChangeNotifier {
     }
   }
 
+  /// Persist name/email changes and refresh the cached account. Throws on error
+  /// so the caller can show an inline message.
+  Future<void> updateProfile({String? name, String? email}) async {
+    final res = await ApiService.updateProfile(name: name, email: email);
+    _account = Account.fromJson(res);
+    notifyListeners();
+  }
+
   Future<void> logout() async {
     await ApiService.logout();
     _account = null;

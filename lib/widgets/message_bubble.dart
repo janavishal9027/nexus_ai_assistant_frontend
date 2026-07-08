@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -503,6 +504,8 @@ class _TypingIndicator extends StatefulWidget {
 class _TypingIndicatorState extends State<_TypingIndicator>
     with SingleTickerProviderStateMixin {
   late AnimationController _controller;
+  Timer? _timer;
+  int _elapsed = 0; // seconds waiting for the first token
 
   @override
   void initState() {
@@ -511,42 +514,63 @@ class _TypingIndicatorState extends State<_TypingIndicator>
       duration: const Duration(milliseconds: 1500),
       vsync: this,
     )..repeat();
+    // Tick once a second so the user sees progress (not a frozen UI) while the
+    // provider is slow to send its first token.
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _elapsed++);
+    });
   }
 
   @override
   void dispose() {
     _controller.dispose();
+    _timer?.cancel();
     super.dispose();
+  }
+
+  String get _status {
+    if (_elapsed >= 20) return 'Still working — the provider may be rate-limited';
+    if (_elapsed >= 8) return 'Working — the model may be busy';
+    return 'Thinking';
   }
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) {
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: List.generate(3, (index) {
-            final delay = index * 0.2;
-            final value = (_controller.value - delay).clamp(0.0, 1.0);
-            final opacity = (value < 0.5) ? value * 2 : (1 - value) * 2;
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 2),
-              child: Opacity(
-                opacity: opacity.clamp(0.3, 1.0),
-                child: Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5),
-                    shape: BoxShape.circle,
+    final theme = Theme.of(context);
+    final subtle = theme.colorScheme.onSurface.withValues(alpha: 0.5);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AnimatedBuilder(
+          animation: _controller,
+          builder: (context, child) {
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(3, (index) {
+                final delay = index * 0.2;
+                final value = (_controller.value - delay).clamp(0.0, 1.0);
+                final opacity = (value < 0.5) ? value * 2 : (1 - value) * 2;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                  child: Opacity(
+                    opacity: opacity.clamp(0.3, 1.0),
+                    child: Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(color: subtle, shape: BoxShape.circle),
+                    ),
                   ),
-                ),
-              ),
+                );
+              }),
             );
-          }),
-        );
-      },
+          },
+        ),
+        const SizedBox(width: 10),
+        Text(
+          '$_status  ${_elapsed}s',
+          style: theme.textTheme.bodySmall?.copyWith(color: subtle, fontSize: 12),
+        ),
+      ],
     );
   }
 }

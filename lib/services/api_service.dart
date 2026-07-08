@@ -150,6 +150,20 @@ class ApiService {
     await clearAuthToken();
   }
 
+  /// Update the current account's name and/or email. Returns the updated account.
+  static Future<Map<String, dynamic>> updateProfile({String? name, String? email}) async {
+    final r = await http.patch(
+      Uri.parse('$_baseUrl/api/auth/me'),
+      headers: _headers(),
+      body: jsonEncode({
+        if (name != null) 'name': name,
+        if (email != null) 'email': email,
+      }),
+    );
+    if (r.statusCode == 200) return jsonDecode(r.body);
+    throw Exception(_tryJson(r.body)['detail']?.toString() ?? 'Failed (HTTP ${r.statusCode})');
+  }
+
   // ─── Config (single source of truth) ──────────────────────────────────
   static Future<Map<String, dynamic>> getConfig() async {
     final response = await http.get(Uri.parse('$_baseUrl/api/config'), headers: _headers(json: false));
@@ -197,6 +211,7 @@ class ApiService {
     double? temperature,
     int? maxTokens,
     List<Message>? history,
+    bool deepResearch = false,
   }) async* {
     final body = <String, dynamic>{'message': message};
     if (conversationId != null) body['conversation_id'] = conversationId;
@@ -204,6 +219,7 @@ class ApiService {
     if (temperature != null) body['temperature'] = temperature;
     if (maxTokens != null) body['max_tokens'] = maxTokens;
     if (history != null) body['history'] = history.map((m) => m.toJson()).toList();
+    if (deepResearch) body['deep_research'] = true;
 
     final request = http.Request('POST', Uri.parse('$_baseUrl/api/chat/stream'));
     request.headers.addAll(_headers());
@@ -241,6 +257,7 @@ class ApiService {
     required String message,
     int? conversationId,
     String? model,
+    bool deepResearch = false,
   }) async* {
     final sessionId = const Uuid().v4();
     final url = '$_wsBase/api/agent/ws/$sessionId?token=${Uri.encodeComponent(_authToken ?? '')}';
@@ -251,6 +268,7 @@ class ApiService {
         'message': message,
         if (conversationId != null) 'conversation_id': conversationId,
         if (model != null) 'model': model,
+        if (deepResearch) 'deep_research': true,
       }));
 
       await for (final raw in ws) {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/conversation.dart';
 import '../services/api_service.dart';
@@ -19,6 +20,15 @@ class ChatProvider extends ChangeNotifier {
   String? _currentModel;
   String? _currentPlatform;
   String _selectedModel = 'auto';
+  // Deep Research mode: routes only to large (>=400B) models and always
+  // gathers live web context for a thorough, cited answer.
+  bool _deepResearch = false;
+
+  // In-flight generation control (cancel / timeout).
+  StreamSubscription<Map<String, dynamic>>? _activeSub;
+  Completer<void>? _turnCompleter;
+  bool _stopped = false;
+  bool get isGenerating => _isLoading;
 
   // Getters
   Map<String, dynamic> get config => _config;
@@ -34,6 +44,7 @@ class ChatProvider extends ChangeNotifier {
   String? get currentModel => _currentModel;
   String? get currentPlatform => _currentPlatform;
   String get selectedModel => _selectedModel;
+  bool get deepResearch => _deepResearch;
 
   /// Get all models from active (keyed) providers only.
   List<Map<String, dynamic>> get availableModels {
@@ -58,6 +69,11 @@ class ChatProvider extends ChangeNotifier {
 
   void setSelectedModel(String model) {
     _selectedModel = model;
+    notifyListeners();
+  }
+
+  void toggleDeepResearch() {
+    _deepResearch = !_deepResearch;
     notifyListeners();
   }
 
@@ -138,6 +154,7 @@ class ChatProvider extends ChangeNotifier {
 
     _messages.add(Message(role: 'user', content: content));
     _isLoading = true;
+    _stopped = false;
     _error = null;
     notifyListeners();
 
@@ -171,6 +188,8 @@ class ChatProvider extends ChangeNotifier {
 
     // Apply one normalized agent event to the streaming message.
     void handleEvent(Map<String, dynamic> evt) {
+      if (evt['model'] != null) model = evt['model'].toString();
+      if (evt['platform'] != null) platform = evt['platform'].toString();
       switch (evt['type']) {
         case 'plan_created':
           final subs = (evt['subtasks'] as List?) ?? [];
@@ -225,42 +244,57 @@ class ChatProvider extends ChangeNotifier {
     }
 
     final modelArg = _selectedModel == 'auto' ? null : _selectedModel;
-    var received = 0;
+    int received = 0;
+
+    // Consume a normalized event stream via a cancelable subscription. A 45s
+    // inter-event timeout catches a hung/very-slow provider (e.g. all models
+    // rate-limited) instead of leaving the UI spinning indefinitely.
+    Future<void> consume(Stream<Map<String, dynamic>> src) {
+      final completer = Completer<void>();
+      _turnCompleter = completer;
+      _activeSub = src
+          .timeout(const Duration(seconds: 45), onTimeout: (sink) {
+            sink.addError(TimeoutException('The model took too long to respond.'));
+          })
+          .listen(
+        (evt) {
+          received++;
+          try {
+            handleEvent(evt);
+          } catch (e) {
+            if (!completer.isCompleted) completer.completeError(e);
+          }
+        },
+        onError: (e) {
+          if (!completer.isCompleted) completer.completeError(e);
+        },
+        onDone: () {
+          if (!completer.isCompleted) completer.complete();
+        },
+        cancelOnError: true,
+      );
+      return completer.future;
+    }
 
     try {
       try {
         // Primary path: Agent Gateway WebSocket (plan + tools + tokens).
-        await for (final evt in ApiService.streamAgentMessage(
+        await consume(ApiService.streamAgentMessage(
           message: content,
           conversationId: _currentConversationId,
           model: modelArg,
-        )) {
-          received++;
-          handleEvent(evt);
-        }
+          deepResearch: _deepResearch,
+        ));
       } catch (wsErr) {
-        // Fall back to the SSE endpoint only if the WebSocket produced nothing
-        // (prevents a duplicated answer when the socket fails mid-stream).
-        if (received > 0) rethrow;
-        await for (final chunk in ApiService.streamMessage(
+        // Fall back to SSE only if the WebSocket produced nothing and the user
+        // didn't cancel (prevents a duplicated answer / a fallback after stop).
+        if (_stopped || received > 0) rethrow;
+        await consume(_sseAsEvents(ApiService.streamMessage(
           message: content,
           conversationId: _currentConversationId,
           model: modelArg,
-        )) {
-          if (chunk['error'] != null) throw Exception(chunk['error'].toString());
-          if (chunk['model'] != null) model = chunk['model'].toString();
-          if (chunk['platform'] != null) platform = chunk['platform'].toString();
-          final piece = chunk['content']?.toString() ?? '';
-          if (piece.isNotEmpty) handleEvent({'type': 'token', 'content': piece});
-          if (chunk['done'] == true) {
-            handleEvent({
-              'type': 'done',
-              'conversation_id': chunk['conversationId'] ?? chunk['conversation_id'],
-              'model': chunk['model'],
-              'platform': chunk['platform'],
-            });
-          }
-        }
+          deepResearch: _deepResearch,
+        )));
       }
 
       // Finalize the streamed message.
@@ -269,16 +303,89 @@ class ChatProvider extends ChangeNotifier {
       _currentPlatform = platform;
       await loadConversations();
     } catch (e) {
-      // Drop the (possibly partial) assistant placeholder on failure.
-      if (assistantIndex < _messages.length &&
-          _messages[assistantIndex].role == 'assistant') {
-        _messages.removeAt(assistantIndex);
+      if (_stopped) {
+        // User cancelled: keep whatever streamed so far, drop an empty bubble.
+        if (buffer.isNotEmpty) {
+          updateAssistant(streaming: false);
+        } else if (assistantIndex < _messages.length &&
+            _messages[assistantIndex].role == 'assistant') {
+          _messages.removeAt(assistantIndex);
+        }
+      } else {
+        if (buffer.isEmpty &&
+            assistantIndex < _messages.length &&
+            _messages[assistantIndex].role == 'assistant') {
+          _messages.removeAt(assistantIndex);
+        } else {
+          updateAssistant(streaming: false);
+        }
+        _error = _friendlyError(e);
       }
-      _error = e.toString().replaceFirst('Exception: ', '');
     } finally {
+      await _activeSub?.cancel();
+      _activeSub = null;
+      _turnCompleter = null;
       _isLoading = false;
       notifyListeners();
     }
+  }
+
+  /// Cancel an in-flight generation. Closes the socket immediately (works even
+  /// if no tokens have arrived yet) and keeps any partial text already streamed.
+  Future<void> stopGeneration() async {
+    if (!_isLoading) return;
+    _stopped = true;
+    await _activeSub?.cancel();
+    if (_turnCompleter != null && !_turnCompleter!.isCompleted) {
+      _turnCompleter!.completeError(Exception('stopped'));
+    }
+  }
+
+  /// Normalize the legacy SSE chunk stream into the same typed events the
+  /// WebSocket path emits, so a single handler covers both.
+  Stream<Map<String, dynamic>> _sseAsEvents(Stream<Map<String, dynamic>> sse) async* {
+    await for (final chunk in sse) {
+      if (chunk['error'] != null) {
+        yield {'type': 'error', 'message': chunk['error'].toString()};
+        return;
+      }
+      final piece = chunk['content']?.toString() ?? '';
+      if (piece.isNotEmpty) {
+        yield {
+          'type': 'token',
+          'content': piece,
+          'model': chunk['model'],
+          'platform': chunk['platform'],
+        };
+      }
+      if (chunk['done'] == true) {
+        yield {
+          'type': 'done',
+          'conversation_id': chunk['conversationId'] ?? chunk['conversation_id'],
+          'model': chunk['model'],
+          'platform': chunk['platform'],
+        };
+      }
+    }
+  }
+
+  /// Turn raw errors into short, actionable guidance for the chat error banner.
+  String _friendlyError(Object e) {
+    final s = e.toString().replaceFirst('Exception: ', '');
+    final lower = s.toLowerCase();
+    if (e is TimeoutException || lower.contains('too long')) {
+      return 'The model took too long to respond — it may be rate-limited. Try again, '
+          'pick a specific model, or add a faster provider (e.g. Groq) in Settings.';
+    }
+    if (lower.contains('exhausted') ||
+        s.contains('429') ||
+        lower.contains('quota') ||
+        lower.contains('rate limit') ||
+        lower.contains('generation failed')) {
+      return 'All available models are busy or rate-limited right now. Try again, or add '
+          'another provider (Groq is fast and free) in Settings.';
+    }
+    return s.isEmpty ? 'Something went wrong. Please try again.' : s;
   }
 
   Future<void> deleteConversation(int id) async {

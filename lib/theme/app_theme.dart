@@ -20,6 +20,10 @@ class AppTheme {
       appBarTheme: const AppBarTheme(
         backgroundColor: Color(0xFF0D0D0D),
         elevation: 0,
+        // Kill the Material 3 primary-colored tint that appears when content
+        // scrolls under the app bar (was showing as a green header).
+        scrolledUnderElevation: 0,
+        surfaceTintColor: Colors.transparent,
         centerTitle: true,
       ),
       inputDecorationTheme: InputDecorationTheme(
@@ -54,6 +58,8 @@ class AppTheme {
       appBarTheme: const AppBarTheme(
         backgroundColor: Colors.white,
         elevation: 0,
+        scrolledUnderElevation: 0,
+        surfaceTintColor: Colors.transparent,
         centerTitle: true,
         iconTheme: IconThemeData(color: Color(0xFF1A1A1A)),
       ),
