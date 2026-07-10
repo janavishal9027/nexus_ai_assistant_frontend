@@ -2,13 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
-import '../providers/auth_provider.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/resize_handle.dart';
 import 'settings_screen.dart';
 import 'profile_screen.dart';
+
+/// Which panel the main content area shows (master-detail with the sidebar).
+/// Settings is a separate full-screen route, so it isn't a view here.
+enum _MainView { chat, profile }
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -20,6 +23,8 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _scrollController = ScrollController();
   bool _sidebarOpen = true;
+  // The main content area shows chat, profile, or settings (sidebar persists).
+  _MainView _view = _MainView.chat;
 
   // Drag-resizable conversation sidebar width (persisted).
   static const double _minSidebar = 220, _maxSidebar = 420;
@@ -69,26 +74,39 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Builder(
         builder: (scaffoldContext) => Row(
           children: [
-            // Single left rail (Chat / Settings / Profile) on desktop.
-            if (isWide)
-              _NavRail(onChatTap: () => setState(() => _sidebarOpen = !_sidebarOpen)),
-            // Conversation sidebar — shown when expanded. Collapsing it leaves
-            // just the single left rail (no second collapsed rail); the rail's
-            // Chat icon re-opens it. Drag the handle on its right edge to resize.
+            // Unified conversation sidebar (brand, nav, conversations, bottom
+            // nav + collapse). Collapsing hides it; the top-bar button reopens
+            // it. Drag the handle on its right edge to resize.
             if (isWide && _sidebarOpen) ...[
               Sidebar(
                 width: _sidebarWidth,
                 onClose: () => setState(() => _sidebarOpen = false),
+                activeView: _viewName,
+                onOpenChat: () => setState(() => _view = _MainView.chat),
+                onOpenProfile: () => setState(() => _view = _MainView.profile),
+                onOpenSettings: _openSettingsRoute,
               ),
               ResizeHandle(
                 onDrag: (dx) => setState(() =>
                     _sidebarWidth = (_sidebarWidth + dx).clamp(_minSidebar, _maxSidebar)),
                 onDragEnd: _saveSidebarWidth,
               ),
-            ],
-            // Main chat area
+            ] else if (isWide)
+              // Collapsed: a slim icon rail (not hidden), with an expand control.
+              CollapsedSidebar(
+                activeView: _viewName,
+                onExpand: () => setState(() => _sidebarOpen = true),
+                onNewChat: () {
+                  context.read<ChatProvider>().startNewChat();
+                  setState(() => _view = _MainView.chat);
+                },
+                onSearch: () => setState(() => _sidebarOpen = true),
+                onProfile: () => setState(() => _view = _MainView.profile),
+                onSettings: _openSettingsRoute,
+              ),
+            // Main content: chat or embedded profile.
             Expanded(
-              child: _buildChatArea(scaffoldContext, isWide),
+              child: _mainContent(scaffoldContext, isWide),
             ),
           ],
         ),
@@ -100,9 +118,40 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Sidebar(
                 isDrawer: true,
                 onClose: () => Navigator.of(context).pop(),
+                activeView: _viewName,
+                onOpenChat: () => setState(() => _view = _MainView.chat),
+                onOpenProfile: () => setState(() => _view = _MainView.profile),
+                onOpenSettings: _openSettingsRoute,
               ),
             ),
     );
+  }
+
+  String get _viewName => switch (_view) {
+        _MainView.profile => 'profile',
+        _MainView.chat => 'chat',
+      };
+
+  void _backToChat() => setState(() => _view = _MainView.chat);
+
+  /// Settings opens as its own full-screen page (its own sub-navigation looks
+  /// cramped embedded next to the main sidebar), unlike Profile which is shown
+  /// inline in the main content area.
+  void _openSettingsRoute() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+    );
+  }
+
+  /// The main panel: chat, or the embedded Profile screen whose back button
+  /// returns here (keeping the sidebar in place).
+  Widget _mainContent(BuildContext context, bool isWide) {
+    switch (_view) {
+      case _MainView.profile:
+        return ProfileScreen(onBack: _backToChat);
+      case _MainView.chat:
+        return _buildChatArea(context, isWide);
+    }
   }
 
   Widget _buildChatArea(BuildContext context, bool isWide) {
@@ -162,6 +211,8 @@ class _ChatScreenState extends State<ChatScreen> {
           onStop: chatProvider.stopGeneration,
           deepResearch: chatProvider.deepResearch,
           onToggleDeepResearch: chatProvider.toggleDeepResearch,
+          webSearch: chatProvider.webSearch,
+          onToggleWebSearch: chatProvider.toggleWebSearch,
         ),
       ],
     );
@@ -173,7 +224,7 @@ class _ChatScreenState extends State<ChatScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Row(
         children: [
-          // Menu button (mobile only — desktop uses the collapsed rail)
+          // Menu button (mobile only)
           if (!isWide)
             IconButton(
               icon: const Icon(Icons.menu, size: 20),
@@ -389,7 +440,14 @@ class _ChatScreenState extends State<ChatScreen> {
       padding: const EdgeInsets.symmetric(vertical: 16),
       itemCount: chatProvider.messages.length,
       itemBuilder: (context, index) {
-        return MessageBubble(message: chatProvider.messages[index]);
+        final msg = chatProvider.messages[index];
+        return MessageBubble(
+          key: ValueKey('msg_$index'),
+          message: msg,
+          index: index,
+          // Only user messages are editable; the bubble shows the control.
+          onEdit: msg.role == 'user' ? chatProvider.editAndResend : null,
+        );
       },
     );
   }
@@ -436,103 +494,3 @@ class _SuggestionChip extends StatelessWidget {
   }
 }
 
-/// Slim far-left navigation rail (desktop): brand, Chat (active), Settings, and
-/// the account avatar (Profile). Keeps the conversation sidebar to its right.
-class _NavRail extends StatelessWidget {
-  final VoidCallback onChatTap;
-  const _NavRail({required this.onChatTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-    final acct = context.watch<AuthProvider>().account;
-    final initial = (acct != null && acct.displayName.isNotEmpty)
-        ? acct.displayName[0].toUpperCase()
-        : '?';
-
-    return Container(
-      width: 56,
-      color: isDark ? const Color(0xFF0A0A0A) : const Color(0xFFEFEFF1),
-      child: Column(
-        children: [
-          const SizedBox(height: 14),
-          Icon(Icons.auto_awesome, size: 22, color: theme.colorScheme.primary),
-          const SizedBox(height: 18),
-          _RailIcon(
-              icon: Icons.forum_outlined, tooltip: 'Chat — toggle sidebar', selected: true, onTap: onChatTap),
-          _RailIcon(
-            icon: Icons.settings_outlined,
-            tooltip: 'Settings',
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const SettingsScreen()),
-            ),
-          ),
-          const Spacer(),
-          Padding(
-            padding: const EdgeInsets.only(bottom: 14),
-            child: Tooltip(
-              message: 'Profile',
-              child: InkWell(
-                borderRadius: BorderRadius.circular(16),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const ProfileScreen()),
-                ),
-                child: CircleAvatar(
-                  radius: 15,
-                  backgroundColor: theme.colorScheme.primary.withValues(alpha: 0.15),
-                  child: Text(initial,
-                      style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: theme.colorScheme.primary)),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RailIcon extends StatelessWidget {
-  final IconData icon;
-  final String tooltip;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _RailIcon({
-    required this.icon,
-    required this.tooltip,
-    required this.onTap,
-    this.selected = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Tooltip(
-        message: tooltip,
-        child: Material(
-          color: selected ? theme.colorScheme.primary.withValues(alpha: 0.12) : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(10),
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: Icon(icon,
-                  size: 20,
-                  color: selected
-                      ? theme.colorScheme.primary
-                      : theme.colorScheme.onSurface.withValues(alpha: 0.6)),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}

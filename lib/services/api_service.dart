@@ -212,6 +212,7 @@ class ApiService {
     int? maxTokens,
     List<Message>? history,
     bool deepResearch = false,
+    bool webSearch = false,
   }) async* {
     final body = <String, dynamic>{'message': message};
     if (conversationId != null) body['conversation_id'] = conversationId;
@@ -220,6 +221,7 @@ class ApiService {
     if (maxTokens != null) body['max_tokens'] = maxTokens;
     if (history != null) body['history'] = history.map((m) => m.toJson()).toList();
     if (deepResearch) body['deep_research'] = true;
+    if (webSearch) body['web_search'] = true;
 
     final request = http.Request('POST', Uri.parse('$_baseUrl/api/chat/stream'));
     request.headers.addAll(_headers());
@@ -258,6 +260,7 @@ class ApiService {
     int? conversationId,
     String? model,
     bool deepResearch = false,
+    bool webSearch = false,
   }) async* {
     final sessionId = const Uuid().v4();
     final url = '$_wsBase/api/agent/ws/$sessionId?token=${Uri.encodeComponent(_authToken ?? '')}';
@@ -269,6 +272,7 @@ class ApiService {
         if (conversationId != null) 'conversation_id': conversationId,
         if (model != null) 'model': model,
         if (deepResearch) 'deep_research': true,
+        if (webSearch) 'web_search': true,
       }));
 
       await for (final raw in ws) {
@@ -314,6 +318,32 @@ class ApiService {
     final response = await http.delete(Uri.parse('$_baseUrl/api/conversations/$id'), headers: _headers(json: false));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Failed to delete conversation (HTTP ${response.statusCode})');
+    }
+  }
+
+  /// Rename a conversation's title.
+  static Future<void> renameConversation(int id, String title) async {
+    final response = await http.patch(
+      Uri.parse('$_baseUrl/api/conversations/$id'),
+      headers: _headers(),
+      body: jsonEncode({'title': title}),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Failed to rename conversation (HTTP ${response.statusCode})');
+    }
+  }
+
+  /// Keep only the first [keep] messages of a conversation, deleting the rest.
+  /// Used when editing an earlier message so the edited turn replaces the old
+  /// exchange (and stays replaced after a reload).
+  static Future<void> truncateConversation(int id, int keep) async {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/api/conversations/$id/truncate'),
+      headers: _headers(),
+      body: jsonEncode({'keep': keep}),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Failed to truncate conversation (HTTP ${response.statusCode})');
     }
   }
 

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:forui/forui.dart';
 import 'package:provider/provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
@@ -16,6 +17,16 @@ void main() async {
   runApp(const NexusAiApp());
 }
 
+/// Forui dark theme, tinted to the app's brand teal so Forui widgets match the
+/// existing Material-styled areas (built once, from zinc-dark's neutral palette).
+final _foruiDarkTheme = FThemeData(
+  touch: false,
+  colors: FColors.zincDark.copyWith(
+    primary: const Color(0xFF10A37F),
+    primaryForeground: Colors.white,
+  ),
+);
+
 class NexusAiApp extends StatelessWidget {
   const NexusAiApp({super.key});
 
@@ -32,6 +43,15 @@ class NexusAiApp extends StatelessWidget {
         theme: AppTheme.lightTheme,
         darkTheme: AppTheme.darkTheme,
         themeMode: ThemeMode.dark,
+        // Forui: provide its theme + localizations app-wide so Forui widgets
+        // (FButton, FCard, FTextField, FScaffold, …) render correctly on every
+        // route. Dark, neutral "zinc" scheme to match the app's dark UI.
+        localizationsDelegates: FLocalizations.localizationsDelegates,
+        supportedLocales: FLocalizations.supportedLocales,
+        builder: (context, child) => FTheme(
+          data: _foruiDarkTheme,
+          child: child!,
+        ),
         home: const _AuthGate(),
       ),
     );

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:forui/forui.dart';
 import 'message_bubble.dart' show kContentMaxWidth;
 
 class ChatInput extends StatefulWidget {
@@ -8,6 +9,8 @@ class ChatInput extends StatefulWidget {
   final VoidCallback? onStop;
   final bool deepResearch;
   final VoidCallback? onToggleDeepResearch;
+  final bool webSearch;
+  final VoidCallback? onToggleWebSearch;
 
   const ChatInput({
     super.key,
@@ -16,6 +19,8 @@ class ChatInput extends StatefulWidget {
     this.onStop,
     this.deepResearch = false,
     this.onToggleDeepResearch,
+    this.webSearch = false,
+    this.onToggleWebSearch,
   });
 
   @override
@@ -27,6 +32,12 @@ class _ChatInputState extends State<ChatInput> {
   final _focusNode = FocusNode();
   bool _hasText = false;
   bool _focused = false;
+
+  // Per-mode accent colours (chip + menu icon).
+  static const _deepColor = Color(0xFF10A37F); // teal — the app's accent
+  static const _webColor = Color(0xFF3B82F6); // blue — web search
+
+  bool get _anyMode => widget.deepResearch || widget.webSearch;
 
   @override
   void initState() {
@@ -73,52 +84,108 @@ class _ChatInputState extends State<ChatInput> {
     _focusNode.requestFocus();
   }
 
-  /// A pill toggle that enables Deep Research mode (large 400B+ models + live
-  /// web research). Highlighted when active.
-  Widget _deepResearchToggle(ThemeData theme) {
-    final active = widget.deepResearch;
-    final primary = theme.colorScheme.primary;
-    final onSurface = theme.colorScheme.onSurface;
-    return Tooltip(
-      message: active
-          ? 'Deep Research on — uses large (400B+) models with live web research'
-          : 'Deep Research — thorough, cited answers from large (400B+) models',
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(20),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(20),
-          onTap: widget.onToggleDeepResearch,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-            decoration: BoxDecoration(
-              color: active ? primary.withValues(alpha: 0.15) : Colors.transparent,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: active
-                    ? primary.withValues(alpha: 0.6)
-                    : onSurface.withValues(alpha: 0.25),
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.travel_explore,
-                    size: 16,
-                    color: active ? primary : onSurface.withValues(alpha: 0.6)),
-                const SizedBox(width: 6),
-                Text(
-                  'Deep Research',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: active ? primary : onSurface.withValues(alpha: 0.7),
-                    fontWeight: active ? FontWeight.w600 : FontWeight.w500,
-                  ),
-                ),
-              ],
+  /// The "+" tools menu: pick Deep research or Web search. Selecting a tool
+  /// activates it (mutually exclusive) and refocuses the field so the user can
+  /// keep typing. The active tool shows a check.
+  Widget _plusMenu() {
+    final colors = context.theme.colors;
+    return PopupMenuButton<String>(
+      tooltip: 'Tools',
+      padding: EdgeInsets.zero,
+      position: PopupMenuPosition.over,
+      color: colors.background,
+      elevation: 8,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: colors.border),
+      ),
+      onSelected: (v) {
+        if (v == 'deep') widget.onToggleDeepResearch?.call();
+        if (v == 'web') widget.onToggleWebSearch?.call();
+        _focusNode.requestFocus();
+      },
+      itemBuilder: (_) => [
+        _toolItem('deep', Icons.travel_explore, 'Deep research',
+            widget.deepResearch, _deepColor),
+        _toolItem('web', Icons.public, 'Web search', widget.webSearch,
+            _webColor),
+      ],
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: _anyMode
+              ? colors.primary.withValues(alpha: 0.14)
+              : colors.foreground.withValues(alpha: 0.06),
+        ),
+        child: Icon(Icons.add_rounded,
+            size: 22,
+            color: _anyMode ? colors.primary : colors.mutedForeground),
+      ),
+    );
+  }
+
+  PopupMenuItem<String> _toolItem(
+      String value, IconData icon, String label, bool active, Color accent) {
+    final colors = context.theme.colors;
+    return PopupMenuItem<String>(
+      value: value,
+      height: 46,
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: accent),
+          const SizedBox(width: 10),
+          Text(label,
+              style: TextStyle(
+                color: colors.foreground,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+              )),
+          const Spacer(),
+          if (active) Icon(Icons.check_rounded, size: 16, color: accent),
+        ],
+      ),
+    );
+  }
+
+  /// The active-mode chip shown at the start of the field (icon + label + a
+  /// small ✕ to turn the mode off), styled in the mode's accent colour.
+  Widget _modeChip() {
+    final isDeep = widget.deepResearch;
+    final accent = isDeep ? _deepColor : _webColor;
+    final icon = isDeep ? Icons.travel_explore : Icons.public;
+    final label = isDeep ? 'Deep research' : 'Web search';
+    final clear =
+        isDeep ? widget.onToggleDeepResearch : widget.onToggleWebSearch;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(9, 5, 5, 5),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: accent),
+          const SizedBox(width: 5),
+          Text(label,
+              style: TextStyle(
+                color: accent,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              )),
+          const SizedBox(width: 3),
+          GestureDetector(
+            onTap: clear,
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.all(2),
+              child: Icon(Icons.close_rounded,
+                  size: 14, color: accent.withValues(alpha: 0.85)),
             ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -128,8 +195,8 @@ class _ChatInputState extends State<ChatInput> {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final primary = theme.colorScheme.primary;
-    // The frame reacts to focus (typing) and to Deep Research being on.
-    final active = _focused || widget.deepResearch;
+    // The frame reacts to focus (typing) and to any mode being on.
+    final active = _focused || _anyMode;
     final baseFill = theme.inputDecorationTheme.fillColor ??
         (isDark ? const Color(0xFF1E1E1E) : const Color(0xFFF2F2F3));
 
@@ -141,9 +208,10 @@ class _ChatInputState extends State<ChatInput> {
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
             curve: Curves.easeOut,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             decoration: BoxDecoration(
               color: baseFill,
-              borderRadius: BorderRadius.circular(26),
+              borderRadius: BorderRadius.circular(28),
               border: Border.all(
                 color: active
                     ? primary.withValues(alpha: 0.75)
@@ -152,7 +220,7 @@ class _ChatInputState extends State<ChatInput> {
               ),
               boxShadow: [
                 // Soft lift off the message list, plus a gentle primary glow
-                // when focused or in Deep Research mode.
+                // when focused or a mode is on.
                 BoxShadow(
                   color: active
                       ? primary.withValues(alpha: 0.16)
@@ -163,46 +231,53 @@ class _ChatInputState extends State<ChatInput> {
                 ),
               ],
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
+            // Single row: [+ tools] [mode chip?] [text field] [send]
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // Text field
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 160),
-                  child: TextField(
-                    controller: _controller,
-                    focusNode: _focusNode,
-                    maxLines: null,
-                    textInputAction: TextInputAction.newline,
-                    style: theme.textTheme.bodyMedium?.copyWith(height: 1.45),
-                    cursorColor: primary,
-                    decoration: InputDecoration(
-                      hintText: widget.deepResearch
-                          ? 'Ask for an in-depth, well-sourced answer…'
-                          : 'Message Nexus AI…',
-                      hintStyle: theme.textTheme.bodyMedium?.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(alpha: 0.4),
+                _plusMenu(),
+                const SizedBox(width: 4),
+                if (_anyMode) ...[
+                  _modeChip(),
+                  const SizedBox(width: 8),
+                ],
+                Expanded(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 140),
+                    child: TextField(
+                      controller: _controller,
+                      focusNode: _focusNode,
+                      maxLines: null,
+                      textInputAction: TextInputAction.newline,
+                      style: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
+                      cursorColor: primary,
+                      decoration: InputDecoration(
+                        hintText: widget.deepResearch
+                            ? 'Ask for an in-depth, well-sourced answer…'
+                            : widget.webSearch
+                                ? 'Search the web and answer…'
+                                : 'Message Nexus AI…',
+                        hintStyle: theme.textTheme.bodyMedium?.copyWith(
+                          color:
+                              theme.colorScheme.onSurface.withValues(alpha: 0.4),
+                        ),
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        isCollapsed: true,
+                        contentPadding:
+                            const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+                        // No fill → Material paints no hover/focus highlight box
+                        // over the field when you click or hover it.
+                        filled: false,
+                        hoverColor: Colors.transparent,
+                        focusColor: Colors.transparent,
                       ),
-                      border: InputBorder.none,
-                      isCollapsed: true,
-                      contentPadding: const EdgeInsets.fromLTRB(18, 16, 18, 6),
-                      fillColor: Colors.transparent,
-                      filled: true,
                     ),
                   ),
                 ),
-                // Toolbar: Deep Research toggle (left) + Send/Stop (right)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(10, 4, 8, 8),
-                  child: Row(
-                    children: [
-                      _deepResearchToggle(theme),
-                      const Spacer(),
-                      _sendButton(theme),
-                    ],
-                  ),
-                ),
+                const SizedBox(width: 4),
+                _sendButton(theme),
               ],
             ),
           ),
@@ -242,7 +317,7 @@ class _ChatInputState extends State<ChatInput> {
           // in-flight request (works even before the first token).
           icon: Icon(
             widget.isLoading ? Icons.stop_rounded : Icons.arrow_upward_rounded,
-            size: widget.isLoading ? 20 : 20,
+            size: 20,
             color: theme.colorScheme.onPrimary,
           ),
           tooltip: widget.isLoading ? 'Stop' : 'Send',

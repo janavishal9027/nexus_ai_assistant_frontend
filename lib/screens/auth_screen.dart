@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:forui/forui.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../services/api_service.dart';
@@ -17,7 +18,7 @@ class _AuthScreenState extends State<AuthScreen> {
   final _passwordCtrl = TextEditingController();
   final _serverCtrl = TextEditingController(text: ApiService.baseUrl);
   bool _isLogin = true;
-  bool _obscure = true;
+  bool _showServer = false;
 
   @override
   void dispose() {
@@ -32,7 +33,6 @@ class _AuthScreenState extends State<AuthScreen> {
     final auth = context.read<AuthProvider>();
     auth.clearError();
     if (!_formKey.currentState!.validate()) return;
-    // Apply/persist the backend URL before authenticating (needed on Android).
     if (_serverCtrl.text.trim().isNotEmpty) {
       await ApiService.setBaseUrl(_serverCtrl.text.trim());
     }
@@ -43,7 +43,6 @@ class _AuthScreenState extends State<AuthScreen> {
     } else {
       await auth.signup(email, password, name: _nameCtrl.text);
     }
-    // On success the AuthGate swaps this screen out automatically.
   }
 
   void _toggleMode() {
@@ -53,11 +52,13 @@ class _AuthScreenState extends State<AuthScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final colors = context.theme.colors;
+    final typography = context.theme.typography;
     final auth = context.watch<AuthProvider>();
 
-    return Scaffold(
-      body: Center(
+    return FScaffold(
+      childPad: false,
+      child: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: ConstrainedBox(
@@ -69,39 +70,33 @@ class _AuthScreenState extends State<AuthScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   // Brand
-                  Icon(Icons.auto_awesome, size: 40, color: theme.colorScheme.primary),
+                  Icon(Icons.auto_awesome, size: 40, color: colors.primary),
                   const SizedBox(height: 12),
                   Text('Nexus AI',
                       textAlign: TextAlign.center,
-                      style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+                      style: typography.display.xl2
+                          .copyWith(fontWeight: FontWeight.bold, color: colors.foreground)),
                   const SizedBox(height: 4),
                   Text(_isLogin ? 'Welcome back' : 'Create your account',
                       textAlign: TextAlign.center,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                          color: theme.colorScheme.onSurface.withValues(alpha: 0.6))),
+                      style: typography.body.sm.copyWith(color: colors.mutedForeground)),
                   const SizedBox(height: 28),
 
                   if (!_isLogin) ...[
-                    TextFormField(
-                      controller: _nameCtrl,
+                    FTextFormField(
+                      control: FTextFieldControl.managed(controller: _nameCtrl),
+                      label: const Text('Name (optional)'),
+                      hint: 'Your name',
                       textInputAction: TextInputAction.next,
-                      decoration: const InputDecoration(
-                        labelText: 'Name (optional)',
-                        prefixIcon: Icon(Icons.person_outline),
-                      ),
                     ),
                     const SizedBox(height: 14),
                   ],
 
-                  TextFormField(
-                    controller: _emailCtrl,
-                    keyboardType: TextInputType.emailAddress,
+                  FTextFormField.email(
+                    control: FTextFieldControl.managed(controller: _emailCtrl),
+                    label: const Text('Email'),
+                    hint: 'you@example.com',
                     textInputAction: TextInputAction.next,
-                    autofillHints: const [AutofillHints.email],
-                    decoration: const InputDecoration(
-                      labelText: 'Email',
-                      prefixIcon: Icon(Icons.email_outlined),
-                    ),
                     validator: (v) {
                       final s = (v ?? '').trim();
                       if (s.isEmpty) return 'Email is required';
@@ -113,19 +108,12 @@ class _AuthScreenState extends State<AuthScreen> {
                   ),
                   const SizedBox(height: 14),
 
-                  TextFormField(
-                    controller: _passwordCtrl,
-                    obscureText: _obscure,
+                  FTextFormField.password(
+                    control: FTextFieldControl.managed(controller: _passwordCtrl),
+                    label: const Text('Password'),
+                    hint: '••••••••',
                     textInputAction: TextInputAction.done,
-                    onFieldSubmitted: (_) => _submit(),
-                    decoration: InputDecoration(
-                      labelText: 'Password',
-                      prefixIcon: const Icon(Icons.lock_outline),
-                      suffixIcon: IconButton(
-                        icon: Icon(_obscure ? Icons.visibility_off : Icons.visibility),
-                        onPressed: () => setState(() => _obscure = !_obscure),
-                      ),
-                    ),
+                    onSubmit: (_) => _submit(),
                     validator: (v) {
                       if ((v ?? '').isEmpty) return 'Password is required';
                       if ((v ?? '').length < 6) return 'At least 6 characters';
@@ -138,43 +126,50 @@ class _AuthScreenState extends State<AuthScreen> {
                     Container(
                       padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(
-                        color: theme.colorScheme.error.withValues(alpha: 0.1),
+                        color: colors.destructive.withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: theme.colorScheme.error.withValues(alpha: 0.4)),
+                        border: Border.all(
+                            color: colors.destructive.withValues(alpha: 0.4)),
                       ),
                       child: Row(
                         children: [
-                          Icon(Icons.error_outline, size: 18, color: theme.colorScheme.error),
+                          Icon(Icons.error_outline,
+                              size: 18, color: colors.destructive),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(auth.error!,
-                                style: TextStyle(color: theme.colorScheme.error, fontSize: 13)),
+                                style: typography.body.sm
+                                    .copyWith(color: colors.destructive)),
                           ),
                         ],
                       ),
                     ),
                   ],
 
-                  const SizedBox(height: 20),
-                  FilledButton(
-                    onPressed: auth.busy ? null : _submit,
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                    ),
+                  const SizedBox(height: 22),
+                  FButton(
+                    onPress: auth.busy ? null : _submit,
                     child: auth.busy
-                        ? const SizedBox(
-                            width: 20, height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                        ? SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: colors.primaryForeground))
                         : Text(_isLogin ? 'Log in' : 'Sign up'),
                   ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 6),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Text(_isLogin ? "Don't have an account?" : 'Already have an account?',
-                          style: theme.textTheme.bodySmall),
-                      TextButton(
-                        onPressed: auth.busy ? null : _toggleMode,
+                      Text(
+                          _isLogin
+                              ? "Don't have an account?"
+                              : 'Already have an account?',
+                          style: typography.body.sm
+                              .copyWith(color: colors.mutedForeground)),
+                      FButton(
+                        variant: FButtonVariant.ghost,
+                        onPress: auth.busy ? null : _toggleMode,
                         child: Text(_isLogin ? 'Sign up' : 'Log in'),
                       ),
                     ],
@@ -182,36 +177,33 @@ class _AuthScreenState extends State<AuthScreen> {
                   const SizedBox(height: 4),
                   // Backend URL — collapsible so it stays out of the way, but is
                   // reachable before login (essential on Android/emulator).
-                  Theme(
-                    data: theme.copyWith(dividerColor: Colors.transparent),
-                    child: ExpansionTile(
-                      tilePadding: EdgeInsets.zero,
-                      childrenPadding: const EdgeInsets.only(bottom: 8),
-                      leading: Icon(Icons.dns_outlined, size: 18,
-                          color: theme.colorScheme.onSurface.withValues(alpha: 0.6)),
-                      title: Text('Server settings',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.onSurface.withValues(alpha: 0.6))),
-                      children: [
-                        TextField(
-                          controller: _serverCtrl,
-                          keyboardType: TextInputType.url,
-                          decoration: const InputDecoration(
-                            labelText: 'Backend URL',
-                            hintText: 'http://10.0.2.2:8080',
-                            isDense: true,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Emulator: http://10.0.2.2:8080  ·  device: http://<your-PC-IP>:8080',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                              fontSize: 10,
-                              color: theme.colorScheme.onSurface.withValues(alpha: 0.5)),
-                        ),
-                      ],
-                    ),
+                  FButton(
+                    variant: FButtonVariant.ghost,
+                    onPress: () => setState(() => _showServer = !_showServer),
+                    prefix: Icon(Icons.dns_outlined,
+                        size: 16, color: colors.mutedForeground),
+                    suffix: Icon(
+                        _showServer ? Icons.expand_less : Icons.expand_more,
+                        size: 18,
+                        color: colors.mutedForeground),
+                    child: Text('Server settings',
+                        style: typography.body.sm
+                            .copyWith(color: colors.mutedForeground)),
                   ),
+                  if (_showServer) ...[
+                    const SizedBox(height: 8),
+                    FTextFormField(
+                      control: FTextFieldControl.managed(controller: _serverCtrl),
+                      label: const Text('Backend URL'),
+                      hint: 'http://10.0.2.2:8080',
+                      keyboardType: TextInputType.url,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Emulator: http://10.0.2.2:8080  ·  device: http://<your-PC-IP>:8080',
+                      style: typography.body.xs.copyWith(color: colors.mutedForeground),
+                    ),
+                  ],
                 ],
               ),
             ),

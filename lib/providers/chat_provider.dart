@@ -23,6 +23,9 @@ class ChatProvider extends ChangeNotifier {
   // Deep Research mode: routes only to large (>=400B) models and always
   // gathers live web context for a thorough, cited answer.
   bool _deepResearch = false;
+  // Web Search mode: forces a live web search for this turn. Mutually
+  // exclusive with Deep Research (only one mode active at a time).
+  bool _webSearch = false;
 
   // In-flight generation control (cancel / timeout).
   StreamSubscription<Map<String, dynamic>>? _activeSub;
@@ -45,6 +48,7 @@ class ChatProvider extends ChangeNotifier {
   String? get currentPlatform => _currentPlatform;
   String get selectedModel => _selectedModel;
   bool get deepResearch => _deepResearch;
+  bool get webSearch => _webSearch;
 
   /// Get all models from active (keyed) providers only.
   List<Map<String, dynamic>> get availableModels {
@@ -74,6 +78,13 @@ class ChatProvider extends ChangeNotifier {
 
   void toggleDeepResearch() {
     _deepResearch = !_deepResearch;
+    if (_deepResearch) _webSearch = false; // modes are mutually exclusive
+    notifyListeners();
+  }
+
+  void toggleWebSearch() {
+    _webSearch = !_webSearch;
+    if (_webSearch) _deepResearch = false; // modes are mutually exclusive
     notifyListeners();
   }
 
@@ -284,6 +295,7 @@ class ChatProvider extends ChangeNotifier {
           conversationId: _currentConversationId,
           model: modelArg,
           deepResearch: _deepResearch,
+          webSearch: _webSearch,
         ));
       } catch (wsErr) {
         // Fall back to SSE only if the WebSocket produced nothing and the user
@@ -294,6 +306,7 @@ class ChatProvider extends ChangeNotifier {
           conversationId: _currentConversationId,
           model: modelArg,
           deepResearch: _deepResearch,
+          webSearch: _webSearch,
         )));
       }
 
@@ -328,6 +341,30 @@ class ChatProvider extends ChangeNotifier {
       _isLoading = false;
       notifyListeners();
     }
+  }
+
+  /// Edit an earlier user message and re-run the turn. Truncates the
+  /// conversation at [index] (dropping the old message and its reply — on the
+  /// backend too, so a reload stays consistent), then resends the edited text.
+  Future<void> editAndResend(int index, String newText) async {
+    if (_isLoading) return;
+    final text = newText.trim();
+    if (text.isEmpty) return;
+    if (index < 0 || index >= _messages.length) return;
+
+    final cid = _currentConversationId;
+    if (cid != null) {
+      try {
+        await ApiService.truncateConversation(cid, index);
+      } catch (_) {
+        // Non-fatal: still resend locally even if backend truncation failed.
+      }
+    }
+    // Drop the old user message at `index` and everything after it.
+    _messages.removeRange(index, _messages.length);
+    notifyListeners();
+
+    await sendMessage(text);
   }
 
   /// Cancel an in-flight generation. Closes the socket immediately (works even
@@ -396,6 +433,18 @@ class ChatProvider extends ChangeNotifier {
         startNewChat();
       }
       notifyListeners();
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+    }
+  }
+
+  Future<void> renameConversation(int id, String title) async {
+    final t = title.trim();
+    if (t.isEmpty) return;
+    try {
+      await ApiService.renameConversation(id, t);
+      await loadConversations();
     } catch (e) {
       _error = e.toString();
       notifyListeners();

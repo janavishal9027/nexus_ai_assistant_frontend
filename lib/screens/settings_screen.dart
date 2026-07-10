@@ -1,13 +1,24 @@
 import 'package:flutter/material.dart';
+import 'package:forui/forui.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
 import '../providers/auth_provider.dart';
 import '../services/api_service.dart';
 import '../widgets/resize_handle.dart';
+import '../widgets/nav_tile.dart';
+import '../utils/app_feedback.dart';
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key});
+  /// Which section to open on (index into `_nav`): 0=Account … 3=Providers.
+  final int initialSection;
+
+  /// When provided, the screen is embedded in the main content area
+  /// (master-detail): the back button returns to chat via this callback instead
+  /// of popping a route.
+  final VoidCallback? onBack;
+
+  const SettingsScreen({super.key, this.initialSection = 0, this.onBack});
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -26,6 +37,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _keySearchCtrl = TextEditingController();
   final _serverUrlController = TextEditingController(text: ApiService.baseUrl);
 
+  // Editable account profile (name / email) shown in the Account section.
+  final _nameCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
+  bool _savingProfile = false;
+  String? _profileError;
+  static final _emailRe = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+
   final _nav = <({IconData icon, String label})>[
     (icon: Icons.account_circle_outlined, label: 'Account'),
     (icon: Icons.dns_outlined, label: 'Server'),
@@ -37,8 +55,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
+    _section = widget.initialSection.clamp(0, _nav.length - 1);
+    _keySearchCtrl.addListener(() {
+      if (_keyQuery != _keySearchCtrl.text) {
+        setState(() => _keyQuery = _keySearchCtrl.text);
+      }
+    });
+    final acct = context.read<AuthProvider>().account;
+    _nameCtrl.text = acct?.name ?? '';
+    _emailCtrl.text = acct?.email ?? '';
     _loadKeys();
     _loadRailWidth();
+  }
+
+  Future<void> _saveProfile() async {
+    final email = _emailCtrl.text.trim();
+    if (email.isEmpty) {
+      setState(() => _profileError = 'Email is required');
+      return;
+    }
+    if (!_emailRe.hasMatch(email)) {
+      setState(() => _profileError = 'Enter a valid email address');
+      return;
+    }
+    setState(() {
+      _savingProfile = true;
+      _profileError = null;
+    });
+    try {
+      await context
+          .read<AuthProvider>()
+          .updateProfile(name: _nameCtrl.text.trim(), email: email);
+      if (mounted) showAppMessage(this.context, 'Profile updated');
+    } catch (e) {
+      setState(() => _profileError = e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) setState(() => _savingProfile = false);
+    }
   }
 
   Future<void> _loadRailWidth() async {
@@ -58,6 +111,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void dispose() {
     _serverUrlController.dispose();
     _keySearchCtrl.dispose();
+    _nameCtrl.dispose();
+    _emailCtrl.dispose();
     super.dispose();
   }
 
@@ -81,7 +136,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         centerTitle: false,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: widget.onBack ?? () => Navigator.of(context).pop(),
         ),
       ),
       body: isWide ? _wideLayout(theme) : _narrowLayout(theme),
@@ -147,49 +202,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _navRail(ThemeData theme) {
+    final colors = context.theme.colors;
     return Container(
       width: _railWidth,
-      // Distinct panel background, matching the chat conversation sidebar.
-      color: theme.colorScheme.surface,
+      color: colors.secondary,
       child: ListView(
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
         children: [
-          for (int i = 0; i < _nav.length; i++) _navTile(theme, i),
+          for (int i = 0; i < _nav.length; i++) _navTile(i),
         ],
       ),
     );
   }
 
-  Widget _navTile(ThemeData theme, int i) {
-    final selected = _section == i;
-    final primary = theme.colorScheme.primary;
+  Widget _navTile(int i) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Material(
-        color: selected ? primary.withValues(alpha: 0.12) : Colors.transparent,
-        borderRadius: BorderRadius.circular(8),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(8),
-          onTap: () => setState(() => _section = i),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-            child: Row(
-              children: [
-                Icon(_nav[i].icon,
-                    size: 18,
-                    color: selected ? primary : theme.colorScheme.onSurface.withValues(alpha: 0.6)),
-                const SizedBox(width: 12),
-                Text(
-                  _nav[i].label,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                    color: selected ? primary : theme.colorScheme.onSurface,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+      padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+      child: NavTile(
+        icon: _nav[i].icon,
+        label: _nav[i].label,
+        selected: _section == i,
+        onTap: () => setState(() => _section = i),
       ),
     );
   }
@@ -239,14 +272,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _card(ThemeData theme, List<Widget> children, {EdgeInsets? padding}) {
-    return Container(
-      width: double.infinity,
-      padding: padding ?? const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: theme.colorScheme.outline.withValues(alpha: 0.2)),
-      ),
+    return FCard(
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
     );
   }
@@ -264,12 +290,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _card(theme, [
           Row(
             children: [
-              CircleAvatar(
-                radius: 22,
-                backgroundColor: theme.colorScheme.primary.withValues(alpha: 0.15),
+              FAvatar.raw(
+                size: 48,
                 child: Text(initial,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                        color: theme.colorScheme.primary, fontWeight: FontWeight.bold)),
+                    style: context.theme.typography.body.lg.copyWith(
+                        color: context.theme.colors.primary,
+                        fontWeight: FontWeight.bold)),
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -290,33 +316,79 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 18),
           Divider(height: 1, color: theme.colorScheme.outline.withValues(alpha: 0.15)),
           const SizedBox(height: 16),
+          // Editable profile details.
+          FTextField(
+            control: FTextFieldControl.managed(controller: _nameCtrl),
+            label: const Text('Name'),
+            hint: 'Your name',
+            textInputAction: TextInputAction.next,
+          ),
+          const SizedBox(height: 12),
+          FTextField.email(
+            control: FTextFieldControl.managed(controller: _emailCtrl),
+            label: const Text('Email'),
+            hint: 'you@example.com',
+          ),
+          if (_profileError != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(Icons.error_outline,
+                    size: 16, color: context.theme.colors.destructive),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(_profileError!,
+                      style: TextStyle(
+                          color: context.theme.colors.destructive, fontSize: 12)),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 14),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: FButton(
+              onPress: _savingProfile ? null : _saveProfile,
+              prefix: _savingProfile
+                  ? SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: context.theme.colors.primaryForeground))
+                  : const Icon(Icons.save_outlined, size: 16),
+              child: const Text('Save changes'),
+            ),
+          ),
+          const SizedBox(height: 18),
+          Divider(height: 1, color: theme.colorScheme.outline.withValues(alpha: 0.15)),
+          const SizedBox(height: 16),
           Wrap(
             spacing: 10,
             runSpacing: 10,
             children: [
-              OutlinedButton.icon(
-                icon: const Icon(Icons.lock_reset, size: 16),
-                label: const Text('Change password'),
-                onPressed: _showChangePasswordDialog,
+              FButton(
+                variant: FButtonVariant.outline,
+                onPress: _showChangePasswordDialog,
+                prefix: const Icon(Icons.lock_reset, size: 16),
+                child: const Text('Change password'),
               ),
-              OutlinedButton.icon(
-                icon: const Icon(Icons.logout, size: 16),
-                label: const Text('Log out'),
-                onPressed: () {
+              FButton(
+                variant: FButtonVariant.outline,
+                onPress: () {
                   final navigator = Navigator.of(context);
                   context.read<ChatProvider>().reset();
                   context.read<AuthProvider>().logout();
                   navigator.pop();
                 },
+                prefix: const Icon(Icons.logout, size: 16),
+                child: const Text('Log out'),
               ),
-              OutlinedButton.icon(
-                icon: const Icon(Icons.delete_forever, size: 16),
-                label: const Text('Delete account'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: theme.colorScheme.error,
-                  side: BorderSide(color: theme.colorScheme.error.withValues(alpha: 0.5)),
-                ),
-                onPressed: _showDeleteAccountDialog,
+              FButton(
+                variant: FButtonVariant.destructive,
+                onPress: _showDeleteAccountDialog,
+                prefix: const Icon(Icons.delete_forever, size: 16),
+                child: const Text('Delete account'),
               ),
             ],
           ),
@@ -331,18 +403,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       children: [
         _header(theme, 'Server Connection', 'Where the app sends chat requests'),
         _card(theme, [
-          TextField(
-            controller: _serverUrlController,
+          FTextField(
+            control: FTextFieldControl.managed(controller: _serverUrlController),
             keyboardType: TextInputType.url,
-            decoration: const InputDecoration(
-              labelText: 'Backend URL',
-              hintText: 'http://localhost:8080',
-              prefixIcon: Icon(Icons.link, size: 18),
-            ),
-            onSubmitted: (value) {
-              final messenger = ScaffoldMessenger.of(context);
+            label: const Text('Backend URL'),
+            hint: 'http://localhost:8080',
+            onSubmit: (value) {
               ApiService.setBaseUrl(value.trim());
-              messenger.showSnackBar(const SnackBar(content: Text('Server URL updated')));
+              showAppMessage(context, 'Server URL updated');
             },
           ),
           const SizedBox(height: 10),
@@ -374,31 +442,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           theme,
           'API Keys',
           'Bring your own provider keys — they stay private to your account',
-          action: FilledButton.icon(
-            onPressed: _showAddKeyDialog,
-            icon: const Icon(Icons.add, size: 18),
-            label: const Text('Add key'),
+          action: FButton(
+            onPress: _showAddKeyDialog,
+            prefix: const Icon(Icons.add, size: 18),
+            child: const Text('Add key'),
           ),
         ),
         if (!_loading && _keys.isNotEmpty) ...[
-          TextField(
-            controller: _keySearchCtrl,
-            onChanged: (v) => setState(() => _keyQuery = v),
-            decoration: InputDecoration(
-              hintText: 'Search keys by provider or label',
-              prefixIcon: const Icon(Icons.search, size: 18),
-              isDense: true,
-              suffixIcon: _keyQuery.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.close, size: 16),
-                      tooltip: 'Clear',
-                      onPressed: () {
-                        _keySearchCtrl.clear();
-                        setState(() => _keyQuery = '');
-                      },
-                    ),
-            ),
+          FTextField(
+            control: FTextFieldControl.managed(controller: _keySearchCtrl),
+            hint: 'Search keys by provider or label',
           ),
           const SizedBox(height: 12),
         ],
@@ -522,14 +575,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             icon: const Icon(Icons.delete_outline, size: 18),
             tooltip: 'Remove key',
             onPressed: () async {
-              final messenger = ScaffoldMessenger.of(context);
               try {
                 await ApiService.deleteKey(key['id']);
                 await _loadKeys();
               } catch (e) {
-                messenger.showSnackBar(SnackBar(
-                    content: Text('Could not remove key: '
-                        '${e.toString().replaceFirst('Exception: ', '')}')));
+                if (!mounted) return;
+                showAppMessage(
+                    context,
+                    'Could not remove key: '
+                    '${e.toString().replaceFirst('Exception: ', '')}',
+                    isError: true);
               }
             },
           ),
@@ -718,6 +773,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 'NVIDIA',
                 'Hugging Face',
                 'Google',
+                'Mistral',
+                'Cerebras',
+                'SambaNova',
+                'Vercel',
+                'Z.ai',
                 'Tavily',
               ])
                 _providerChip(theme, p),
@@ -832,6 +892,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
         icon = Icons.auto_awesome;
         color = Colors.lightBlue;
         break;
+      case 'mistral':
+        icon = Icons.air;
+        color = const Color(0xFFFF7000);
+        break;
+      case 'cerebras':
+        icon = Icons.speed;
+        color = const Color(0xFFEF4444);
+        break;
+      case 'sambanova':
+        icon = Icons.hub;
+        color = const Color(0xFFA855F7);
+        break;
+      case 'vercel':
+        icon = Icons.change_history;
+        color = const Color(0xFF94A3B8);
+        break;
+      case 'zai':
+        icon = Icons.hexagon;
+        color = const Color(0xFF6366F1);
+        break;
       case 'tavily':
         icon = Icons.travel_explore;
         color = Colors.teal;
@@ -927,7 +1007,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ? null
                   : () async {
                       if (keyController.text.trim().isEmpty) return;
-                      final messenger = ScaffoldMessenger.of(this.context);
                       final navigator = Navigator.of(dialogContext);
                       setDialogState(() => submitting = true);
                       try {
@@ -939,19 +1018,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               : null,
                         );
                         navigator.pop();
-                        messenger.showSnackBar(
-                          SnackBar(content: Text('${selectedPlatform.toUpperCase()} key added')),
-                        );
+                        if (mounted) {
+                          showAppMessage(this.context,
+                              '${selectedPlatform.toUpperCase()} key added');
+                        }
                         _loadKeys();
                       } catch (e) {
                         setDialogState(() => submitting = false);
-                        messenger.showSnackBar(
-                          SnackBar(
-                            backgroundColor: Colors.red,
-                            content: Text(
-                                'Could not add key: ${e.toString().replaceFirst('Exception: ', '')}'),
-                          ),
-                        );
+                        if (mounted) {
+                          showAppMessage(
+                              this.context,
+                              'Could not add key: ${e.toString().replaceFirst('Exception: ', '')}',
+                              isError: true);
+                        }
                       }
                     },
               child: submitting
@@ -972,48 +1051,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
     bool submitting = false;
     String? error;
 
-    showDialog(
+    showAdaptiveDialog(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
+        builder: (context, setDialogState) => FDialog(
           title: const Text('Change password'),
-          content: SizedBox(
+          body: SizedBox(
             width: _dialogWidth(context),
             child: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                TextField(
-                  controller: currentCtrl,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: 'Current password'),
+                const SizedBox(height: 8),
+                FTextField.password(
+                  control: FTextFieldControl.managed(controller: currentCtrl),
+                  label: const Text('Current password'),
                 ),
                 const SizedBox(height: 10),
-                TextField(
-                  controller: newCtrl,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: 'New password (min 6)'),
+                FTextField.password(
+                  control: FTextFieldControl.managed(controller: newCtrl),
+                  label: const Text('New password (min 6)'),
                 ),
                 const SizedBox(height: 10),
-                TextField(
-                  controller: confirmCtrl,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: 'Confirm new password'),
+                FTextField.password(
+                  control: FTextFieldControl.managed(controller: confirmCtrl),
+                  label: const Text('Confirm new password'),
                 ),
                 if (error != null) ...[
                   const SizedBox(height: 10),
                   Text(error!,
-                      style: const TextStyle(color: Colors.red, fontSize: 12)),
+                      style: TextStyle(
+                          color: context.theme.colors.destructive, fontSize: 12)),
                 ],
               ],
             ),
           ),
           actions: [
-            TextButton(
-              onPressed: submitting ? null : () => Navigator.of(dialogContext).pop(),
+            FButton(
+              variant: FButtonVariant.outline,
+              onPress: submitting ? null : () => Navigator.of(dialogContext).pop(),
               child: const Text('Cancel'),
             ),
-            FilledButton(
-              onPressed: submitting
+            FButton(
+              onPress: submitting
                   ? null
                   : () async {
                       if (newCtrl.text.length < 6) {
@@ -1024,7 +1104,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         setDialogState(() => error = 'Passwords do not match');
                         return;
                       }
-                      final messenger = ScaffoldMessenger.of(this.context);
                       final navigator = Navigator.of(dialogContext);
                       setDialogState(() {
                         submitting = true;
@@ -1033,8 +1112,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       try {
                         await ApiService.changePassword(currentCtrl.text, newCtrl.text);
                         navigator.pop();
-                        messenger
-                            .showSnackBar(const SnackBar(content: Text('Password updated')));
+                        if (mounted) showAppMessage(this.context, 'Password updated');
                       } catch (e) {
                         setDialogState(() {
                           submitting = false;
@@ -1055,26 +1133,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _showDeleteAccountDialog() {
     bool submitting = false;
-    showDialog(
+    showAdaptiveDialog(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
+        builder: (context, setDialogState) => FDialog(
           title: const Text('Delete account'),
-          content: const Text(
-            'This permanently deletes your account, all your conversations, and your '
-            'private API keys. This cannot be undone.',
+          body: const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'This permanently deletes your account, all your conversations, and your '
+              'private API keys. This cannot be undone.',
+            ),
           ),
           actions: [
-            TextButton(
-              onPressed: submitting ? null : () => Navigator.of(dialogContext).pop(),
+            FButton(
+              variant: FButtonVariant.outline,
+              onPress: submitting ? null : () => Navigator.of(dialogContext).pop(),
               child: const Text('Cancel'),
             ),
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: Colors.red),
-              onPressed: submitting
+            FButton(
+              variant: FButtonVariant.destructive,
+              onPress: submitting
                   ? null
                   : () async {
-                      final messenger = ScaffoldMessenger.of(this.context);
                       final settingsNavigator = Navigator.of(this.context);
                       final auth = this.context.read<AuthProvider>();
                       final chat = this.context.read<ChatProvider>();
@@ -1082,16 +1163,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       try {
                         await ApiService.deleteAccount();
                         Navigator.of(dialogContext).pop();
-                        settingsNavigator.pop();
+                        // Pushed route: close Settings. Embedded: AuthGate swaps
+                        // the home when logout fires, so nothing to pop.
+                        if (widget.onBack == null) settingsNavigator.pop();
                         chat.reset();
                         await auth.logout();
                       } catch (e) {
                         setDialogState(() => submitting = false);
-                        messenger.showSnackBar(SnackBar(
-                          backgroundColor: Colors.red,
-                          content: Text('Could not delete account: '
-                              '${e.toString().replaceFirst('Exception: ', '')}'),
-                        ));
+                        if (mounted) {
+                          showAppMessage(
+                              this.context,
+                              'Could not delete account: '
+                              '${e.toString().replaceFirst('Exception: ', '')}',
+                              isError: true);
+                        }
                       }
                     },
               child: submitting

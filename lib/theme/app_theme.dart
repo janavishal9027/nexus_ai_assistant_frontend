@@ -4,6 +4,8 @@ import 'package:google_fonts/google_fonts.dart';
 class AppTheme {
   static ThemeData get darkTheme {
     return ThemeData(
+      // Material 3 across every platform (desktop, Android, iOS, web).
+      useMaterial3: true,
       brightness: Brightness.dark,
       scaffoldBackgroundColor: const Color(0xFF0D0D0D),
       primaryColor: const Color(0xFF10A37F),
@@ -26,6 +28,15 @@ class AppTheme {
         surfaceTintColor: Colors.transparent,
         centerTitle: true,
       ),
+      // Floating, dark, rounded toasts — not the default full-width light bar.
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xFF212121),
+        contentTextStyle: const TextStyle(color: Color(0xFFECECEC)),
+        actionTextColor: const Color(0xFF10A37F),
+        elevation: 6,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: const Color(0xFF2F2F2F),
@@ -42,6 +53,8 @@ class AppTheme {
 
   static ThemeData get lightTheme {
     return ThemeData(
+      // Material 3 across every platform (desktop, Android, iOS, web).
+      useMaterial3: true,
       brightness: Brightness.light,
       scaffoldBackgroundColor: Colors.white,
       primaryColor: const Color(0xFF10A37F),
@@ -62,6 +75,14 @@ class AppTheme {
         surfaceTintColor: Colors.transparent,
         centerTitle: true,
         iconTheme: IconThemeData(color: Color(0xFF1A1A1A)),
+      ),
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xFF323232),
+        contentTextStyle: const TextStyle(color: Colors.white),
+        actionTextColor: const Color(0xFF10A37F),
+        elevation: 6,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,

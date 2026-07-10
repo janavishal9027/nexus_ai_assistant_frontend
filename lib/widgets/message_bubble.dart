@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import '../utils/app_feedback.dart';
 import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_highlight/themes/atom-one-dark.dart';
 import 'package:flutter_highlight/themes/github.dart';
@@ -10,10 +11,51 @@ import '../models/conversation.dart';
 /// Max width of the conversation reading column (messages + input align to it).
 const double kContentMaxWidth = 768;
 
-class MessageBubble extends StatelessWidget {
+class MessageBubble extends StatefulWidget {
   final Message message;
+  final int? index;
+  final void Function(int index, String newText)? onEdit;
 
-  const MessageBubble({super.key, required this.message});
+  const MessageBubble({super.key, required this.message, this.index, this.onEdit});
+
+  @override
+  State<MessageBubble> createState() => _MessageBubbleState();
+}
+
+class _MessageBubbleState extends State<MessageBubble> {
+  bool _editing = false;
+  bool _hovering = false;
+  late final TextEditingController _editCtrl =
+      TextEditingController(text: widget.message.content);
+
+  Message get message => widget.message;
+  bool get _canEdit => widget.index != null && widget.onEdit != null;
+
+  @override
+  void dispose() {
+    _editCtrl.dispose();
+    super.dispose();
+  }
+
+  void _startEdit() {
+    _editCtrl.text = message.content;
+    setState(() => _editing = true);
+  }
+
+  void _cancelEdit() => setState(() => _editing = false);
+
+  void _submitEdit() {
+    final text = _editCtrl.text.trim();
+    if (text.isEmpty) return;
+    setState(() => _editing = false);
+    widget.onEdit?.call(widget.index!, text);
+  }
+
+  void _copy() {
+    Clipboard.setData(ClipboardData(text: message.content));
+    if (!mounted) return;
+    showAppMessage(context, 'Copied to clipboard');
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -32,106 +74,247 @@ class MessageBubble extends StatelessWidget {
                 isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-          if (!isUser) ...[
-            // Assistant avatar
-            Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(
-                color: const Color(0xFF8B5CF6).withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(15),
+              if (!isUser) ...[
+                // Assistant avatar
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF8B5CF6).withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: const Icon(Icons.auto_awesome,
+                      size: 16, color: Color(0xFF8B5CF6)),
+                ),
+                const SizedBox(width: 10),
+              ],
+              // Message content
+              Flexible(
+                child: isUser
+                    ? (_editing ? _editor(theme) : _userBubble(theme))
+                    : _assistantBubble(theme),
               ),
-              child: const Icon(
-                Icons.auto_awesome,
-                size: 16,
-                color: Color(0xFF8B5CF6),
+              if (isUser) const SizedBox(width: 10),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── User message: bubble + WhatsApp-style options menu ──────────────────
+  Widget _userBubble(ThemeData theme) {
+    final primary = theme.colorScheme.primary;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: GestureDetector(
+        // Long-press (touch) or right-click (desktop) opens the options menu.
+        onLongPressStart: (d) => _showOptionsMenu(d.globalPosition),
+        onSecondaryTapDown: (d) => _showOptionsMenu(d.globalPosition),
+        child: Stack(
+          children: [
+            Container(
+              // Extra right padding reserves room for the top-right chevron so
+              // it never sits on top of the text (keeps a clear gap).
+              padding: const EdgeInsets.fromLTRB(14, 10, 30, 10),
+              decoration: BoxDecoration(
+                color: primary,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(16),
+                  topRight: Radius.circular(16),
+                  bottomLeft: Radius.circular(16),
+                  bottomRight: Radius.circular(4),
+                ),
+              ),
+              child: Text(
+                message.content,
+                style: const TextStyle(color: Colors.white, height: 1.5),
               ),
             ),
-            const SizedBox(width: 10),
-          ],
-          // Message content
-          Flexible(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: isUser
-                    ? theme.colorScheme.primary
-                    : theme.colorScheme.surface,
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(16),
-                  topRight: const Radius.circular(16),
-                  bottomLeft: isUser ? const Radius.circular(16) : const Radius.circular(4),
-                  bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(16),
-                ),
-                border: isUser
-                    ? null
-                    : Border.all(color: theme.colorScheme.outline.withValues(alpha: 0.2)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Agent activity: planner steps + live tool runs
-                  if (!isUser && message.activity != null)
-                    _AgentActivityView(activity: message.activity!),
-                  // Content
-                  if (message.isStreaming && message.content.isEmpty)
-                    const _TypingIndicator()
-                  else if (isUser)
-                    Text(
-                      message.content,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        height: 1.5,
+            // Down-chevron at the top-right corner (WhatsApp-Web style): fades
+            // in on hover and opens the options menu. A gradient of the bubble
+            // colour masks any text behind it so it stays readable.
+            Positioned(
+              top: 0,
+              right: 0,
+              child: AnimatedOpacity(
+                opacity: _hovering ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 120),
+                child: IgnorePointer(
+                  ignoring: !_hovering,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTapDown: (d) => _showOptionsMenu(d.globalPosition),
+                    child: Container(
+                      width: 34,
+                      height: 28,
+                      alignment: Alignment.topRight,
+                      padding: const EdgeInsets.only(top: 1, right: 3),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topRight,
+                          end: Alignment.bottomLeft,
+                          colors: [
+                            primary,
+                            primary.withValues(alpha: 0.0),
+                          ],
+                        ),
+                        borderRadius: const BorderRadius.only(
+                          topRight: Radius.circular(16),
+                        ),
                       ),
-                    )
-                  else
-                    _MessageContent(message: message),
-                  // Footer: copy (left) + model name (bottom-right)
-                  if (!isUser && message.content.isNotEmpty && !message.isStreaming)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Row(
-                        children: [
-                          InkWell(
-                            onTap: () {
-                              Clipboard.setData(
-                                  ClipboardData(text: message.content));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Copied to clipboard'),
-                                  duration: Duration(seconds: 1),
-                                ),
-                              );
-                            },
-                            borderRadius: BorderRadius.circular(4),
-                            child: Icon(
-                              Icons.copy,
-                              size: 14,
-                              color: theme.colorScheme.onSurface
-                                  .withValues(alpha: 0.4),
-                            ),
-                          ),
-                          const Spacer(),
-                          if (message.model != null)
-                            Text(
-                              message.model!,
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: theme.colorScheme.primary,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                        ],
+                      child: const Icon(
+                        Icons.keyboard_arrow_down,
+                        size: 19,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// WhatsApp-style popup at the press location: Copy, and (for your own
+  /// messages) Edit.
+  Future<void> _showOptionsMenu(Offset globalPos) async {
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+    final screen = MediaQuery.of(context).size;
+    Widget item(IconData icon, String label) => Row(
+          children: [
+            Icon(icon, size: 18, color: onSurface.withValues(alpha: 0.8)),
+            const SizedBox(width: 12),
+            Text(label),
+          ],
+        );
+    final selected = await showMenu<String>(
+      context: context,
+      color: theme.colorScheme.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(globalPos.dx, globalPos.dy, 0, 0),
+        Offset.zero & screen,
+      ),
+      items: [
+        PopupMenuItem<String>(
+            value: 'copy', height: 44, child: item(Icons.copy, 'Copy')),
+        if (_canEdit)
+          PopupMenuItem<String>(
+              value: 'edit', height: 44, child: item(Icons.edit_outlined, 'Edit')),
+      ],
+    );
+    if (!mounted) return;
+    if (selected == 'copy') {
+      _copy();
+    } else if (selected == 'edit') {
+      _startEdit();
+    }
+  }
+
+  // ── User message: inline editor ─────────────────────────────────────────
+  Widget _editor(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surface,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+                color: theme.colorScheme.primary.withValues(alpha: 0.6), width: 1.4),
+          ),
+          child: TextField(
+            controller: _editCtrl,
+            autofocus: true,
+            maxLines: null,
+            style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
+            decoration: const InputDecoration.collapsed(
+                hintText: 'Edit your message'),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextButton(
+              onPressed: _cancelEdit,
+              style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  foregroundColor: theme.colorScheme.onSurface.withValues(alpha: 0.7)),
+              child: const Text('Cancel'),
+            ),
+            const SizedBox(width: 6),
+            FilledButton(
+              onPressed: _submitEdit,
+              style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
+              child: const Text('Send'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ── Assistant message: content + copy + model footer (unchanged) ────────
+  Widget _assistantBubble(ThemeData theme) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(16),
+          topRight: Radius.circular(16),
+          bottomLeft: Radius.circular(4),
+          bottomRight: Radius.circular(16),
+        ),
+        border: Border.all(color: theme.colorScheme.outline.withValues(alpha: 0.2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Agent activity: planner steps + live tool runs
+          if (message.activity != null)
+            _AgentActivityView(activity: message.activity!),
+          // Content
+          if (message.isStreaming && message.content.isEmpty)
+            const _TypingIndicator()
+          else
+            _MessageContent(message: message),
+          // Footer: copy (left) + model name (bottom-right)
+          if (message.content.isNotEmpty && !message.isStreaming)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(
+                children: [
+                  InkWell(
+                    onTap: _copy,
+                    borderRadius: BorderRadius.circular(4),
+                    child: Icon(Icons.copy,
+                        size: 14,
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.4)),
+                  ),
+                  const Spacer(),
+                  if (message.model != null)
+                    Text(
+                      message.model!,
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: theme.colorScheme.primary,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                 ],
               ),
             ),
-          ),
-              if (isUser) const SizedBox(width: 10),
-            ],
-          ),
-        ),
+        ],
       ),
     );
   }
