@@ -1,10 +1,16 @@
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:forui/forui.dart';
+import 'package:file_selector/file_selector.dart';
+import 'package:image_picker/image_picker.dart';
+import '../models/chat_attachment.dart';
+import '../utils/app_feedback.dart';
 import 'message_bubble.dart' show kContentMaxWidth;
 
 class ChatInput extends StatefulWidget {
-  final Function(String) onSend;
+  final void Function(String text, List<ChatAttachment> attachments) onSend;
   final bool isLoading;
   final VoidCallback? onStop;
   final bool deepResearch;
@@ -39,11 +45,20 @@ class _ChatInputState extends State<ChatInput> {
   bool _hasText = false;
   bool _focused = false;
 
+  // Files staged for the next message (images + documents).
+  final List<ChatAttachment> _attachments = [];
+  static const _maxAttachments = 8;
+  static const _maxBytesEach = 20 * 1024 * 1024; // 20 MB
+
   // Per-mode accent colours (chip + menu icon).
   static const _deepColor = Color(0xFF10A37F); // teal — the app's accent
   static const _webColor = Color(0xFF3B82F6); // blue — web search
 
   bool get _anyMode => widget.deepResearch || widget.webSearch;
+
+  // Camera capture is only meaningful on mobile.
+  bool get _isMobile => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+  bool get _canSend => _hasText || _attachments.isNotEmpty;
 
   @override
   void initState() {
@@ -84,10 +99,77 @@ class _ChatInputState extends State<ChatInput> {
 
   void _handleSend() {
     final text = _controller.text.trim();
-    if (text.isEmpty || widget.isLoading) return;
-    widget.onSend(text);
+    if ((text.isEmpty && _attachments.isEmpty) || widget.isLoading) return;
+    widget.onSend(text, List.of(_attachments));
     _controller.clear();
+    setState(() => _attachments.clear());
     _focusNode.requestFocus();
+  }
+
+  Future<void> _addAttachment(XFile? file) async {
+    if (file == null) return;
+    if (_attachments.length >= _maxAttachments) {
+      if (mounted) showAppMessage(context, 'You can attach up to $_maxAttachments files');
+      return;
+    }
+    final bytes = await file.readAsBytes();
+    if (bytes.length > _maxBytesEach) {
+      if (mounted) showAppMessage(context, '${file.name} is too large (max 20 MB)');
+      return;
+    }
+    setState(() {
+      _attachments.add(ChatAttachment(
+        name: file.name,
+        mimeType: file.mimeType,
+        bytes: bytes,
+      ));
+    });
+    _focusNode.requestFocus();
+  }
+
+  /// Attach any file (all platforms).
+  Future<void> _pickFile() async {
+    try {
+      final file = await openFile();
+      await _addAttachment(file);
+    } catch (e) {
+      if (mounted) showAppMessage(context, 'Could not pick file: $e');
+    }
+  }
+
+  /// Attach a photo from the gallery. Uses image_picker on mobile/web and the
+  /// file dialog (image filter) on desktop.
+  Future<void> _pickPhoto() async {
+    try {
+      if (_isMobile || kIsWeb) {
+        final x = await ImagePicker().pickImage(source: ImageSource.gallery);
+        await _addAttachment(x);
+      } else {
+        const group = XTypeGroup(
+          label: 'Images',
+          extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'],
+        );
+        XFile? file;
+        try {
+          file = await openFile(acceptedTypeGroups: const [group]);
+        } catch (_) {
+          file = await openFile();
+        }
+        await _addAttachment(file);
+      }
+    } catch (e) {
+      if (mounted) showAppMessage(context, 'Could not pick photo: $e');
+    }
+  }
+
+  /// Capture a photo with the camera (mobile only).
+  Future<void> _takePhoto() async {
+    try {
+      final x = await ImagePicker().pickImage(source: ImageSource.camera);
+      await _addAttachment(x);
+    } catch (e) {
+      if (mounted) showAppMessage(context, 'Could not open camera: $e');
+    }
   }
 
   /// The "+" tools menu: pick Deep research or Web search. Selecting a tool
@@ -106,11 +188,32 @@ class _ChatInputState extends State<ChatInput> {
         side: BorderSide(color: colors.border),
       ),
       onSelected: (v) {
-        if (v == 'deep') widget.onToggleDeepResearch?.call();
-        if (v == 'web') widget.onToggleWebSearch?.call();
-        _focusNode.requestFocus();
+        switch (v) {
+          case 'deep':
+            widget.onToggleDeepResearch?.call();
+            _focusNode.requestFocus();
+            break;
+          case 'web':
+            widget.onToggleWebSearch?.call();
+            _focusNode.requestFocus();
+            break;
+          case 'file':
+            _pickFile();
+            break;
+          case 'photo':
+            _pickPhoto();
+            break;
+          case 'camera':
+            _takePhoto();
+            break;
+        }
       },
       itemBuilder: (_) => [
+        // On mobile the camera leads the menu (above Attach file).
+        if (_isMobile)
+          _actionItem('camera', Icons.photo_camera_outlined, 'Camera'),
+        _actionItem('file', Icons.attach_file_rounded, 'Attach file'),
+        _actionItem('photo', Icons.image_outlined, 'Photo'),
         _toolItem('deep', Icons.travel_explore, 'Deep research',
             widget.deepResearch, _deepColor),
         _toolItem('web', Icons.public, 'Web search', widget.webSearch,
@@ -150,6 +253,92 @@ class _ChatInputState extends State<ChatInput> {
           const Spacer(),
           if (active) Icon(Icons.check_rounded, size: 16, color: accent),
         ],
+      ),
+    );
+  }
+
+  /// A non-toggle action row in the "+" menu (attach file / photo / camera).
+  PopupMenuItem<String> _actionItem(String value, IconData icon, String label) {
+    final colors = context.theme.colors;
+    return PopupMenuItem<String>(
+      value: value,
+      height: 46,
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: colors.mutedForeground),
+          const SizedBox(width: 10),
+          Text(label,
+              style: TextStyle(
+                  color: colors.foreground, fontWeight: FontWeight.w500)),
+        ],
+      ),
+    );
+  }
+
+  /// Horizontal strip of staged attachments shown above the input row. Images
+  /// render as thumbnails; other files as labelled chips. Each has a ✕ to remove.
+  Widget _attachmentStrip() {
+    final theme = Theme.of(context);
+    final colors = context.theme.colors;
+    return Container(
+      height: 66,
+      margin: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: _attachments.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (_, i) {
+          final a = _attachments[i];
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                width: a.isImage ? 58 : 150,
+                height: 58,
+                decoration: BoxDecoration(
+                  color: colors.secondary,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: colors.border),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: a.isImage
+                    ? Image.memory(a.bytes, fit: BoxFit.cover)
+                    : Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: Row(
+                          children: [
+                            Icon(Icons.description_outlined,
+                                size: 20, color: colors.primary),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(a.name,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.bodySmall),
+                            ),
+                          ],
+                        ),
+                      ),
+              ),
+              Positioned(
+                top: -6,
+                right: -6,
+                child: GestureDetector(
+                  onTap: () => setState(() => _attachments.removeAt(i)),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.7),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: colors.border),
+                    ),
+                    padding: const EdgeInsets.all(2),
+                    child: const Icon(Icons.close_rounded, size: 13, color: Colors.white),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -202,7 +391,7 @@ class _ChatInputState extends State<ChatInput> {
     final isDark = theme.brightness == Brightness.dark;
     final primary = theme.colorScheme.primary;
     // The frame reacts to focus (typing) and to any mode being on.
-    final active = _focused || _anyMode;
+    final active = _focused || _anyMode || _attachments.isNotEmpty;
     final baseFill = theme.inputDecorationTheme.fillColor ??
         (isDark ? const Color(0xFF1E1E1E) : const Color(0xFFF2F2F3));
 
@@ -241,8 +430,13 @@ class _ChatInputState extends State<ChatInput> {
                 ),
               ],
             ),
-            // Single row: [+ tools] [mode chip?] [text field] [send]
-            child: Row(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_attachments.isNotEmpty) _attachmentStrip(),
+                // Single row: [+ tools] [mode chip?] [text field] [send]
+                Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 _plusMenu(),
@@ -288,6 +482,8 @@ class _ChatInputState extends State<ChatInput> {
                 ),
                 const SizedBox(width: 4),
                 _sendButton(theme),
+              ],
+                ),
               ],
             ),
           ),
@@ -364,7 +560,7 @@ class _ChatInputState extends State<ChatInput> {
   /// dims when there's nothing to send.
   Widget _sendButton(ThemeData theme) {
     final primary = theme.colorScheme.primary;
-    final enabled = widget.isLoading || _hasText;
+    final enabled = widget.isLoading || _canSend;
     return AnimatedScale(
       scale: enabled ? 1.0 : 0.9,
       duration: const Duration(milliseconds: 150),
@@ -397,7 +593,7 @@ class _ChatInputState extends State<ChatInput> {
           tooltip: widget.isLoading ? 'Stop' : 'Send',
           onPressed: widget.isLoading
               ? widget.onStop
-              : (_hasText ? _handleSend : null),
+              : (_canSend ? _handleSend : null),
           padding: EdgeInsets.zero,
         ),
       ),

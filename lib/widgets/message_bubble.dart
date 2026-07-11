@@ -11,6 +11,7 @@ import 'package:flutter_highlight/themes/github.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
 import '../models/conversation.dart';
+import '../models/chat_attachment.dart';
 import '../providers/chat_provider.dart';
 
 /// Max width of the conversation reading column (messages + input align to it).
@@ -383,6 +384,50 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 
   // ── User message: bubble + WhatsApp-style options menu ──────────────────
+  /// Thumbnails (images) and file chips shown inside a sent user bubble.
+  Widget _bubbleAttachments(List<ChatAttachment> atts) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: message.content.isNotEmpty ? 8 : 0),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        alignment: WrapAlignment.end,
+        children: [
+          for (final a in atts)
+            if (a.isImage)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.memory(a.bytes,
+                    width: 130, height: 130, fit: BoxFit.cover),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.description_outlined,
+                        size: 16, color: Colors.white),
+                    const SizedBox(width: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 180),
+                      child: Text(a.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Colors.white, fontSize: 13)),
+                    ),
+                  ],
+                ),
+              ),
+        ],
+      ),
+    );
+  }
+
   Widget _userBubble(ThemeData theme) {
     final primary = theme.colorScheme.primary;
     return MouseRegion(
@@ -407,9 +452,18 @@ class _MessageBubbleState extends State<MessageBubble> {
                   bottomRight: Radius.circular(4),
                 ),
               ),
-              child: Text(
-                message.content,
-                style: const TextStyle(color: Colors.white, height: 1.5),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (message.attachments != null && message.attachments!.isNotEmpty)
+                    _bubbleAttachments(message.attachments!),
+                  if (message.content.isNotEmpty)
+                    Text(
+                      message.content,
+                      style: const TextStyle(color: Colors.white, height: 1.5),
+                    ),
+                ],
               ),
             ),
             // Down-chevron at the top-right corner (WhatsApp-Web style): fades
@@ -484,6 +538,9 @@ class _MessageBubbleState extends State<MessageBubble> {
       items: [
         PopupMenuItem<String>(
             value: 'copy', height: 44, child: item(Icons.copy, 'Copy')),
+        PopupMenuItem<String>(
+            value: 'retry', height: 44,
+            child: item(Icons.refresh_rounded, 'Retry')),
         if (_canEdit)
           PopupMenuItem<String>(
               value: 'edit', height: 44, child: item(Icons.edit_outlined, 'Edit')),
@@ -492,9 +549,23 @@ class _MessageBubbleState extends State<MessageBubble> {
     if (!mounted) return;
     if (selected == 'copy') {
       _copy();
+    } else if (selected == 'retry') {
+      _retryUser();
     } else if (selected == 'edit') {
       _startEdit();
     }
+  }
+
+  /// Re-send this user turn as-is (text + attachments), regenerating the reply.
+  void _retryUser() {
+    final idx = widget.index;
+    if (idx == null) return;
+    final provider = context.read<ChatProvider>();
+    if (provider.isLoading) {
+      showAppMessage(context, 'Please wait for the current reply to finish');
+      return;
+    }
+    provider.retryUserTurn(idx);
   }
 
   // ── User message: inline editor ─────────────────────────────────────────

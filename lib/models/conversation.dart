@@ -1,3 +1,5 @@
+import 'chat_attachment.dart';
+
 class Conversation {
   final int id;
   final String title;
@@ -63,6 +65,9 @@ class Message {
   final String? platform;
   final bool isStreaming;
   final AgentActivity? activity;
+  // Files attached to this (user) turn — shown as chips/thumbnails on the
+  // bubble. Not populated when reloading history from the server.
+  final List<ChatAttachment>? attachments;
 
   Message({
     required this.role,
@@ -71,6 +76,7 @@ class Message {
     this.platform,
     this.isStreaming = false,
     this.activity,
+    this.attachments,
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
@@ -96,6 +102,7 @@ class Message {
     String? platform,
     bool? isStreaming,
     AgentActivity? activity,
+    List<ChatAttachment>? attachments,
   }) {
     return Message(
       role: role ?? this.role,
@@ -104,6 +111,7 @@ class Message {
       platform: platform ?? this.platform,
       isStreaming: isStreaming ?? this.isStreaming,
       activity: activity ?? this.activity,
+      attachments: attachments ?? this.attachments,
     );
   }
 }

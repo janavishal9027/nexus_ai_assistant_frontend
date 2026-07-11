@@ -3,6 +3,7 @@ import 'package:forui/forui.dart';
 import 'package:provider/provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/chat_provider.dart';
+import 'providers/kb_provider.dart';
 import 'screens/auth_screen.dart';
 import 'screens/chat_screen.dart';
 import 'services/api_service.dart';
@@ -36,6 +37,7 @@ class NexusAiApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => AuthProvider()..tryAutoLogin()),
         ChangeNotifierProvider(create: (_) => ChatProvider()),
+        ChangeNotifierProvider(create: (_) => KbProvider()),
       ],
       child: MaterialApp(
         title: 'Nexus AI',

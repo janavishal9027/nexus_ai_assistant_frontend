@@ -74,6 +74,12 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<!-- Attachments: image_picker needs these usage strings or the app crashes
+	     when opening the camera / photo library on iOS. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Take a photo to attach to your chat message.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Attach photos from your library to your chat message.</string>
 	<!-- URL schemes the app opens via url_launcher. iOS 9+ requires each
 	     non-http scheme to be declared here or canLaunchUrl/launchUrl fails. -->
 	<key>LSApplicationQueriesSchemes</key>

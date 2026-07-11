@@ -5,6 +5,8 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../models/conversation.dart';
+import '../models/knowledge_base.dart';
+import '../models/chat_attachment.dart';
 
 class ApiService {
   static String _baseUrl = 'http://localhost:8080';
@@ -213,6 +215,7 @@ class ApiService {
     List<Message>? history,
     bool deepResearch = false,
     bool webSearch = false,
+    List<ChatAttachment>? attachments,
   }) async* {
     final body = <String, dynamic>{'message': message};
     if (conversationId != null) body['conversation_id'] = conversationId;
@@ -222,6 +225,9 @@ class ApiService {
     if (history != null) body['history'] = history.map((m) => m.toJson()).toList();
     if (deepResearch) body['deep_research'] = true;
     if (webSearch) body['web_search'] = true;
+    if (attachments != null && attachments.isNotEmpty) {
+      body['attachments'] = attachments.map((a) => a.toJson()).toList();
+    }
 
     final request = http.Request('POST', Uri.parse('$_baseUrl/api/chat/stream'));
     request.headers.addAll(_headers());
@@ -417,5 +423,178 @@ class ApiService {
 
   static Future<void> deleteKey(int id) async {
     await http.delete(Uri.parse('$_baseUrl/api/keys/$id'), headers: _headers(json: false));
+  }
+
+  // ─── Knowledge Base (RAG) ─────────────────────────────────────────────
+  static Future<List<KnowledgeBase>> listKnowledgeBases() async {
+    final r = await http.get(Uri.parse('$_baseUrl/api/kb'), headers: _headers(json: false));
+    if (r.statusCode == 200) {
+      return (jsonDecode(r.body) as List)
+          .map((e) => KnowledgeBase.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+    return [];
+  }
+
+  static Future<KnowledgeBase> createKnowledgeBase(String name, {String? description}) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/api/kb'),
+      headers: _headers(),
+      body: jsonEncode({'name': name, if (description != null) 'description': description}),
+    );
+    if (r.statusCode == 200) return KnowledgeBase.fromJson(jsonDecode(r.body));
+    throw Exception(_tryJson(r.body)['detail']?.toString() ?? 'Failed to create (HTTP ${r.statusCode})');
+  }
+
+  static Future<KnowledgeBase> getKnowledgeBase(int id) async {
+    final r = await http.get(Uri.parse('$_baseUrl/api/kb/$id'), headers: _headers(json: false));
+    if (r.statusCode == 200) return KnowledgeBase.fromJson(jsonDecode(r.body));
+    throw Exception('Knowledge base not found');
+  }
+
+  static Future<void> updateKnowledgeBase(int id, {String? name, String? description}) async {
+    final r = await http.patch(
+      Uri.parse('$_baseUrl/api/kb/$id'),
+      headers: _headers(),
+      body: jsonEncode({
+        if (name != null) 'name': name,
+        if (description != null) 'description': description,
+      }),
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw Exception('Failed to update (HTTP ${r.statusCode})');
+    }
+  }
+
+  static Future<void> deleteKnowledgeBase(int id) async {
+    final r = await http.delete(Uri.parse('$_baseUrl/api/kb/$id'), headers: _headers(json: false));
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw Exception('Failed to delete (HTTP ${r.statusCode})');
+    }
+  }
+
+  static Future<List<KbDocument>> listDocuments(int kbId) async {
+    final r = await http.get(Uri.parse('$_baseUrl/api/kb/$kbId/documents'), headers: _headers(json: false));
+    if (r.statusCode == 200) {
+      return (jsonDecode(r.body) as List)
+          .map((e) => KbDocument.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+    return [];
+  }
+
+  /// Upload a document (multipart). Returns the created document + job id.
+  static Future<Map<String, dynamic>> uploadDocument(
+      int kbId, String filename, List<int> bytes) async {
+    final req = http.MultipartRequest('POST', Uri.parse('$_baseUrl/api/kb/$kbId/documents'));
+    if (isAuthenticated) req.headers['Authorization'] = 'Bearer $_authToken';
+    req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+    final streamed = await req.send();
+    final body = await streamed.stream.bytesToString();
+    if (streamed.statusCode >= 200 && streamed.statusCode < 300) {
+      return jsonDecode(body) as Map<String, dynamic>;
+    }
+    throw Exception(_tryJson(body)['detail']?.toString() ??
+        'Upload failed (HTTP ${streamed.statusCode})');
+  }
+
+  static Future<IngestionJob> getDocumentJob(int kbId, int docId) async {
+    final r = await http.get(
+        Uri.parse('$_baseUrl/api/kb/$kbId/documents/$docId/job'),
+        headers: _headers(json: false));
+    if (r.statusCode == 200) return IngestionJob.fromJson(jsonDecode(r.body));
+    throw Exception('No ingestion job');
+  }
+
+  static Future<void> deleteDocument(int kbId, int docId) async {
+    final r = await http.delete(
+        Uri.parse('$_baseUrl/api/kb/$kbId/documents/$docId'),
+        headers: _headers(json: false));
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw Exception('Failed to delete document (HTTP ${r.statusCode})');
+    }
+  }
+
+  static Future<void> reingestDocument(int kbId, int docId) async {
+    final r = await http.post(
+        Uri.parse('$_baseUrl/api/kb/$kbId/documents/$docId/reingest'),
+        headers: _headers(json: false));
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw Exception('Failed to re-ingest (HTTP ${r.statusCode})');
+    }
+  }
+
+  static Future<List<SourceChunk>> searchKnowledgeBase(int kbId, String query, {int? topK}) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/api/kb/$kbId/search'),
+      headers: _headers(),
+      body: jsonEncode({'query': query, if (topK != null) 'top_k': topK}),
+    );
+    if (r.statusCode == 200) {
+      final list = (jsonDecode(r.body)['sources'] as List?) ?? [];
+      return list.map((e) => SourceChunk.fromJson(e as Map<String, dynamic>)).toList();
+    }
+    throw Exception(_tryJson(r.body)['detail']?.toString() ?? 'Search failed (HTTP ${r.statusCode})');
+  }
+
+  /// Grounded streaming chat against a KB. Yields SSE events: the first carries
+  /// `sources` (citations), then `content` deltas, then a final `done` event
+  /// with `conversationId`.
+  static Stream<Map<String, dynamic>> streamKbChat({
+    required int kbId,
+    required String query,
+    int? conversationId,
+    String? model,
+    List<Message>? history,
+  }) async* {
+    final body = <String, dynamic>{'query': query};
+    if (conversationId != null) body['conversation_id'] = conversationId;
+    if (model != null) body['model'] = model;
+    if (history != null) body['history'] = history.map((m) => m.toJson()).toList();
+
+    final request = http.Request('POST', Uri.parse('$_baseUrl/api/kb/$kbId/chat/stream'));
+    request.headers.addAll(_headers());
+    request.headers['Accept'] = 'text/event-stream';
+    request.body = jsonEncode(body);
+
+    final client = http.Client();
+    try {
+      final response = await client.send(request);
+      if (response.statusCode != 200) {
+        final err = await response.stream.bytesToString();
+        throw Exception(_tryJson(err)['error']?.toString() ??
+            'Chat failed (HTTP ${response.statusCode})');
+      }
+      await for (final chunk in response.stream.transform(utf8.decoder)) {
+        for (final line in chunk.split('\n')) {
+          if (line.startsWith('data:')) {
+            final data = line.substring(5).trim();
+            if (data.isEmpty) continue;
+            try {
+              yield jsonDecode(data);
+            } catch (_) {}
+          }
+        }
+      }
+    } finally {
+      client.close();
+    }
+  }
+
+  static Future<List<Conversation>> listKbConversations(int kbId) async {
+    final r = await http.get(
+        Uri.parse('$_baseUrl/api/kb/$kbId/conversations'), headers: _headers(json: false));
+    if (r.statusCode == 200) {
+      return (jsonDecode(r.body) as List).map((e) => Conversation.fromJson(e)).toList();
+    }
+    return [];
+  }
+
+  static Future<Conversation> getKbConversation(int kbId, int convId) async {
+    final r = await http.get(
+        Uri.parse('$_baseUrl/api/kb/$kbId/conversations/$convId'),
+        headers: _headers(json: false));
+    if (r.statusCode == 200) return Conversation.fromJson(jsonDecode(r.body));
+    throw Exception('Conversation not found');
   }
 }

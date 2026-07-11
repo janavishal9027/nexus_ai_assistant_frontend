@@ -229,8 +229,8 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         // Input
         ChatInput(
-          onSend: (text) {
-            chatProvider.sendMessage(text);
+          onSend: (text, attachments) {
+            chatProvider.sendMessage(text, attachments: attachments);
             _scrollToBottom();
           },
           isLoading: chatProvider.isLoading,

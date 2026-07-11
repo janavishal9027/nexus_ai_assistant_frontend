@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/conversation.dart';
+import '../models/chat_attachment.dart';
 import '../services/api_service.dart';
 
 class ChatProvider extends ChangeNotifier {
@@ -169,8 +170,9 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> sendMessage(String content) async {
-    if (content.trim().isEmpty) return;
+  Future<void> sendMessage(String content, {List<ChatAttachment>? attachments}) async {
+    final hasAttachments = attachments != null && attachments.isNotEmpty;
+    if (content.trim().isEmpty && !hasAttachments) return;
 
     // Materialize a pending "new chat" branch on the first message: create the
     // branch on the backend now (copying the history up to the branch point) so
@@ -187,7 +189,7 @@ class ChatProvider extends ChangeNotifier {
       _pendingBranchUpTo = null;
     }
 
-    _messages.add(Message(role: 'user', content: content));
+    _messages.add(Message(role: 'user', content: content, attachments: attachments));
     _isLoading = true;
     _stopped = false;
     _error = null;
@@ -312,26 +314,39 @@ class ChatProvider extends ChangeNotifier {
     }
 
     try {
-      try {
-        // Primary path: Agent Gateway WebSocket (plan + tools + tokens).
-        await consume(ApiService.streamAgentMessage(
-          message: content,
-          conversationId: _currentConversationId,
-          model: modelArg,
-          deepResearch: _deepResearch,
-          webSearch: _webSearch,
-        ));
-      } catch (wsErr) {
-        // Fall back to SSE only if the WebSocket produced nothing and the user
-        // didn't cancel (prevents a duplicated answer / a fallback after stop).
-        if (_stopped || received > 0) rethrow;
+      if (hasAttachments) {
+        // Attachments (images/documents) are only handled by the SSE multimodal
+        // endpoint — the Agent WebSocket path has no attachment support.
         await consume(_sseAsEvents(ApiService.streamMessage(
           message: content,
           conversationId: _currentConversationId,
           model: modelArg,
           deepResearch: _deepResearch,
           webSearch: _webSearch,
+          attachments: attachments,
         )));
+      } else {
+        try {
+          // Primary path: Agent Gateway WebSocket (plan + tools + tokens).
+          await consume(ApiService.streamAgentMessage(
+            message: content,
+            conversationId: _currentConversationId,
+            model: modelArg,
+            deepResearch: _deepResearch,
+            webSearch: _webSearch,
+          ));
+        } catch (wsErr) {
+          // Fall back to SSE only if the WebSocket produced nothing and the user
+          // didn't cancel (prevents a duplicated answer / a fallback after stop).
+          if (_stopped || received > 0) rethrow;
+          await consume(_sseAsEvents(ApiService.streamMessage(
+            message: content,
+            conversationId: _currentConversationId,
+            model: modelArg,
+            deepResearch: _deepResearch,
+            webSearch: _webSearch,
+          )));
+        }
       }
 
       // Finalize the streamed message.
@@ -389,6 +404,30 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
 
     await sendMessage(text);
+  }
+
+  /// Re-send an earlier USER turn exactly as it was — same text AND attachments
+  /// — dropping its old reply. Used by the user-message "Retry" option (e.g. to
+  /// re-run a turn after adding a working provider). Note: attachments only
+  /// survive for messages still in memory; a turn reloaded from the server has
+  /// no attachments to resend.
+  Future<void> retryUserTurn(int userIndex) async {
+    if (_isLoading) return;
+    if (userIndex < 0 || userIndex >= _messages.length) return;
+    final msg = _messages[userIndex];
+    if (msg.role != 'user') return;
+    final text = msg.content;
+    final atts = msg.attachments;
+
+    final cid = _currentConversationId;
+    if (cid != null) {
+      try {
+        await ApiService.truncateConversation(cid, userIndex);
+      } catch (_) {/* non-fatal: still resend locally */}
+    }
+    _messages.removeRange(userIndex, _messages.length);
+    notifyListeners();
+    await sendMessage(text, attachments: atts);
   }
 
   /// Retry an assistant reply: re-run the user turn that produced the message at
