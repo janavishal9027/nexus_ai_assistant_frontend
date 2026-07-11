@@ -1,12 +1,17 @@
 import 'dart:async';
+import 'dart:io' show Platform, Process;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import '../utils/app_feedback.dart';
 import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_highlight/themes/atom-one-dark.dart';
 import 'package:flutter_highlight/themes/github.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:provider/provider.dart';
 import '../models/conversation.dart';
+import '../providers/chat_provider.dart';
 
 /// Max width of the conversation reading column (messages + input align to it).
 const double kContentMaxWidth = 768;
@@ -25,6 +30,7 @@ class MessageBubble extends StatefulWidget {
 class _MessageBubbleState extends State<MessageBubble> {
   bool _editing = false;
   bool _hovering = false;
+  int _feedback = 0; // 0 = none, 1 = good, -1 = bad (local, per message)
   late final TextEditingController _editCtrl =
       TextEditingController(text: widget.message.content);
 
@@ -55,6 +61,280 @@ class _MessageBubbleState extends State<MessageBubble> {
     Clipboard.setData(ClipboardData(text: message.content));
     if (!mounted) return;
     showAppMessage(context, 'Copied to clipboard');
+  }
+
+  // ── Assistant response actions ──────────────────────────────────────────
+  Widget _actionIcon(ThemeData theme, IconData icon, String tooltip,
+      VoidCallback onTap,
+      {bool active = false, IconData? activeIcon}) {
+    final color = active
+        ? theme.colorScheme.primary
+        : theme.colorScheme.onSurface.withValues(alpha: 0.45);
+    return Tooltip(
+      message: tooltip,
+      waitDuration: const Duration(milliseconds: 400),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.all(5),
+          child:
+              Icon(active ? (activeIcon ?? icon) : icon, size: 15, color: color),
+        ),
+      ),
+    );
+  }
+
+  void _setFeedback(int v) {
+    setState(() => _feedback = _feedback == v ? 0 : v);
+    if (_feedback == 1) {
+      showAppMessage(context, 'Thanks for the feedback');
+    } else if (_feedback == -1) {
+      showAppMessage(context, "Thanks — we'll try to do better");
+    }
+  }
+
+  void _retry() {
+    final idx = widget.index;
+    if (idx == null) return;
+    final provider = context.read<ChatProvider>();
+    if (provider.isLoading) {
+      showAppMessage(context, 'Please wait for the current reply to finish');
+      return;
+    }
+    provider.regenerate(idx, modelId: provider.modelIdForName(message.model));
+  }
+
+  // ── Share (Nexus AI) ─────────────────────────────────────────────────────
+  Future<void> _openUrl(String url) async {
+    try {
+      if (Platform.isWindows) {
+        // rundll32's FileProtocolHandler opens the default browser and accepts
+        // far longer URLs than `cmd /c start` (which is capped near 8191 chars).
+        await Process.start('rundll32', ['url.dll,FileProtocolHandler', url]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [url]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [url]);
+      } else {
+        // Android / iOS: dart:io Process isn't available in the mobile sandbox;
+        // hand the URL to the OS (opens the browser or target app, e.g. WhatsApp).
+        final ok = await launchUrl(Uri.parse(url),
+            mode: LaunchMode.externalApplication);
+        if (!ok) {
+          await Clipboard.setData(ClipboardData(text: url));
+          if (mounted) showAppMessage(context, 'Link copied — paste to share');
+        }
+      }
+    } catch (_) {
+      await Clipboard.setData(ClipboardData(text: url));
+      if (mounted) showAppMessage(context, 'Link copied — paste to share');
+    }
+  }
+
+  /// Share the FULL response text to a social URL. If the resulting URL would be
+  /// too long for the OS to launch, copy the whole text to the clipboard (so
+  /// nothing is lost) and share as much as still fits.
+  Future<void> _openShare(String base, String rawText) async {
+    const maxUrl = 28000; // safely under Windows' ~32767 command-line limit
+    var body = rawText;
+    if (base.length + Uri.encodeComponent(body).length > maxUrl) {
+      await Clipboard.setData(ClipboardData(text: rawText));
+      while (body.isNotEmpty &&
+          base.length + Uri.encodeComponent(body).length > maxUrl) {
+        body = body.substring(0, (body.length * 0.85).floor());
+      }
+      if (mounted) {
+        showAppMessage(context,
+            'Long response — full text copied to clipboard; paste to include all');
+      }
+    }
+    await _openUrl('$base${Uri.encodeComponent(body)}');
+  }
+
+  void _share() =>
+      showDialog(context: context, builder: (ctx) => _shareDialog(ctx));
+
+  Widget _shareDialog(BuildContext ctx) {
+    final theme = Theme.of(ctx);
+    final text = message.content;
+    final tagged = '$text\n\n— shared from Nexus AI';
+    return Dialog(
+      backgroundColor: theme.colorScheme.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 440),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Icon(Icons.auto_awesome,
+                    color: theme.colorScheme.primary, size: 20),
+                const SizedBox(width: 8),
+                Text('Share via Nexus AI',
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.bold)),
+                const Spacer(),
+                IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: () => Navigator.of(ctx).pop()),
+              ]),
+              const SizedBox(height: 6),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.04),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 120),
+                  child: SingleChildScrollView(
+                    child: Text(text,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                            height: 1.4,
+                            color: theme.colorScheme.onSurface
+                                .withValues(alpha: 0.75))),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _shareTarget(
+                      theme, Icons.copy, 'Copy', const Color(0xFF10A37F), () {
+                    Clipboard.setData(ClipboardData(text: tagged));
+                    Navigator.of(ctx).pop();
+                    showAppMessage(context, 'Response copied — share anywhere');
+                  }),
+                  _shareTarget(theme, Icons.chat, 'WhatsApp',
+                      const Color(0xFF25D366), () {
+                    _openShare('https://wa.me/?text=', text);
+                    Navigator.of(ctx).pop();
+                  },
+                      glyph: const FaIcon(FontAwesomeIcons.whatsapp,
+                          color: Colors.white, size: 24)),
+                  _shareTarget(theme, Icons.business_center, 'LinkedIn',
+                      const Color(0xFF0A66C2), () {
+                    _openShare(
+                        'https://www.linkedin.com/feed/?shareActive=true&text=',
+                        text);
+                    Navigator.of(ctx).pop();
+                  },
+                      glyph: const FaIcon(FontAwesomeIcons.linkedinIn,
+                          color: Colors.white, size: 22)),
+                  _shareTarget(theme, Icons.forum, 'Reddit',
+                      const Color(0xFFFF4500), () {
+                    _openShare(
+                        'https://www.reddit.com/submit?title=Nexus%20AI&text=',
+                        text);
+                    Navigator.of(ctx).pop();
+                  },
+                      glyph: const FaIcon(FontAwesomeIcons.redditAlien,
+                          color: Colors.white, size: 22)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Center(
+                child: Text('Only this response is shared — not your whole chat.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                        fontSize: 11,
+                        color: theme.colorScheme.onSurface
+                            .withValues(alpha: 0.4))),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _shareTarget(ThemeData theme, IconData icon, String label, Color color,
+      VoidCallback onTap, {Widget? glyph}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 46,
+              height: 46,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              child: glyph ?? Icon(icon, color: Colors.white, size: 22),
+            ),
+            const SizedBox(height: 6),
+            Text(label,
+                style: theme.textTheme.bodySmall?.copyWith(fontSize: 11)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── Branch (dropdown of chats) ───────────────────────────────────────────
+  Widget _branchButton(ThemeData theme) {
+    final provider = context.read<ChatProvider>();
+    final currentId = provider.currentConversationId;
+    final color = theme.colorScheme.onSurface.withValues(alpha: 0.45);
+    return PopupMenuButton<int>(
+      tooltip: 'Branch to another chat',
+      padding: EdgeInsets.zero,
+      position: PopupMenuPosition.under,
+      constraints: const BoxConstraints(maxHeight: 340, minWidth: 220),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      onSelected: (v) => _doBranch(v == -1 ? null : v),
+      itemBuilder: (ctx) {
+        final convos = provider.conversations;
+        return <PopupMenuEntry<int>>[
+          PopupMenuItem<int>(
+            value: -1,
+            height: 42,
+            child: Row(children: [
+              Icon(Icons.add, size: 16, color: theme.colorScheme.primary),
+              const SizedBox(width: 8),
+              const Text('New chat', style: TextStyle(fontSize: 13)),
+            ]),
+          ),
+          const PopupMenuDivider(),
+          for (final c in convos)
+            if (c.id != currentId)
+              PopupMenuItem<int>(
+                value: c.id,
+                height: 40,
+                child: Text(c.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13)),
+              ),
+        ];
+      },
+      child: Padding(
+        padding: const EdgeInsets.all(5),
+        child: Icon(Icons.call_split, size: 15, color: color),
+      ),
+    );
+  }
+
+  Future<void> _doBranch(int? targetId) async {
+    final idx = widget.index;
+    if (idx == null) return;
+    final provider = context.read<ChatProvider>();
+    final newId = await provider.branchTo(idx, targetId: targetId);
+    if (!mounted) return;
+    if (targetId == null) {
+      // Deferred: the new branch is saved only once the user asks something.
+      showAppMessage(context, 'New branch — ask a question to save it');
+    } else if (newId != null) {
+      showAppMessage(context, 'Branched into the chat');
+    }
   }
 
   @override
@@ -288,27 +568,37 @@ class _MessageBubbleState extends State<MessageBubble> {
             const _TypingIndicator()
           else
             _MessageContent(message: message),
-          // Footer: copy (left) + model name (bottom-right)
+          // Footer: response actions (copy / good / bad / share / retry /
+          // branch) on the left, the model badge on the right.
           if (message.content.isNotEmpty && !message.isStreaming)
             Padding(
-              padding: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.only(top: 6),
               child: Row(
                 children: [
-                  InkWell(
-                    onTap: _copy,
-                    borderRadius: BorderRadius.circular(4),
-                    child: Icon(Icons.copy,
-                        size: 14,
-                        color: theme.colorScheme.onSurface.withValues(alpha: 0.4)),
-                  ),
-                  const Spacer(),
+                  _actionIcon(theme, Icons.copy, 'Copy', _copy),
+                  _actionIcon(theme, Icons.thumb_up_outlined, 'Good response',
+                      () => _setFeedback(1),
+                      active: _feedback == 1, activeIcon: Icons.thumb_up),
+                  _actionIcon(theme, Icons.thumb_down_outlined, 'Bad response',
+                      () => _setFeedback(-1),
+                      active: _feedback == -1, activeIcon: Icons.thumb_down),
+                  _actionIcon(theme, Icons.ios_share, 'Share', _share),
+                  _actionIcon(
+                      theme, Icons.refresh, 'Retry (same model)', _retry),
+                  _branchButton(theme),
+                  const SizedBox(width: 6),
                   if (message.model != null)
-                    Text(
-                      message.model!,
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: theme.colorScheme.primary,
-                        fontWeight: FontWeight.w500,
+                    Expanded(
+                      child: Text(
+                        message.model!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.right,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: theme.colorScheme.primary,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
                 ],
@@ -690,6 +980,18 @@ class _TypingIndicatorState extends State<_TypingIndicator>
   Timer? _timer;
   int _elapsed = 0; // seconds waiting for the first token
 
+  // Playful, ever-changing status words (à la Claude's "Ruminating…").
+  // Shuffled per response so it doesn't always start the same, then advances
+  // to the next word every ~2 seconds.
+  static const _thinkingWords = <String>[
+    'Ruminating', 'Booping', 'Percolating', 'Pondering', 'Noodling',
+    'Mulling', 'Cogitating', 'Marinating', 'Simmering', 'Brewing',
+    'Conjuring', 'Tinkering', 'Whirring', 'Musing', 'Puzzling',
+    'Synthesizing', 'Wrangling', 'Finessing', 'Untangling', 'Concocting',
+    'Spelunking', 'Divining', 'Vibing', 'Scheming',
+  ];
+  late final List<String> _words = List<String>.of(_thinkingWords)..shuffle();
+
   @override
   void initState() {
     super.initState();
@@ -712,9 +1014,10 @@ class _TypingIndicatorState extends State<_TypingIndicator>
   }
 
   String get _status {
-    if (_elapsed >= 20) return 'Still working — the provider may be rate-limited';
-    if (_elapsed >= 8) return 'Working — the model may be busy';
-    return 'Thinking';
+    // Keep the playful, ever-changing word rotating the whole time (Claude
+    // style) — even during a long wait. The elapsed seconds shown beside it
+    // already signal when it's taking a while.
+    return '${_words[(_elapsed ~/ 2) % _words.length]}…';
   }
 
   @override

@@ -172,22 +172,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _narrowLayout(ThemeData theme) {
     return Column(
       children: [
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-          child: Row(
-            children: [
-              for (int i = 0; i < _nav.length; i++)
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    label: Text(_nav[i].label),
-                    avatar: Icon(_nav[i].icon, size: 16),
-                    selected: _section == i,
-                    onSelected: (_) => setState(() => _section = i),
-                  ),
-                ),
-            ],
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                  color: theme.colorScheme.outline.withValues(alpha: 0.25)),
+            ),
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<int>(
+                value: _section,
+                isExpanded: true,
+                borderRadius: BorderRadius.circular(12),
+                icon: Icon(Icons.keyboard_arrow_down_rounded,
+                    color: theme.colorScheme.primary),
+                items: [
+                  for (int i = 0; i < _nav.length; i++)
+                    DropdownMenuItem(
+                      value: i,
+                      child: Row(
+                        children: [
+                          Icon(_nav[i].icon,
+                              size: 18, color: theme.colorScheme.primary),
+                          const SizedBox(width: 12),
+                          Text(_nav[i].label,
+                              style: theme.textTheme.titleSmall),
+                        ],
+                      ),
+                    ),
+                ],
+                onChanged: (v) => setState(() => _section = v ?? 0),
+              ),
+            ),
           ),
         ),
         Divider(height: 1, color: theme.colorScheme.outline.withValues(alpha: 0.15)),
@@ -611,6 +630,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 (providers[i]['description'] ?? '').toString(),
                 providers[i]['active'] == true,
                 (providers[i]['key_count'] ?? 0) as int,
+                (providers[i]['models'] as List?)?.length ?? 0,
               ),
             ],
           ],
@@ -620,7 +640,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _providerRow(ThemeData theme, String name, String description, bool active, int keyCount) {
+  Widget _providerRow(ThemeData theme, String name, String description,
+      bool active, int keyCount, int modelCount) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -646,6 +667,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
+          if (modelCount > 0) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text('$modelCount model${modelCount == 1 ? '' : 's'}',
+                  style: TextStyle(
+                      fontSize: 10,
+                      color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                      fontWeight: FontWeight.w600)),
+            ),
+            const SizedBox(width: 6),
+          ],
           if (active)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -1010,7 +1046,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       final navigator = Navigator.of(dialogContext);
                       setDialogState(() => submitting = true);
                       try {
-                        await ApiService.addKey(
+                        final res = await ApiService.addKey(
                           selectedPlatform,
                           keyController.text.trim(),
                           label: labelController.text.trim().isNotEmpty
@@ -1019,8 +1055,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         );
                         navigator.pop();
                         if (mounted) {
-                          showAppMessage(this.context,
-                              '${selectedPlatform.toUpperCase()} key added');
+                          final synced =
+                              (res['models_synced'] as num?)?.toInt() ?? 0;
+                          final err = res['sync_error']?.toString();
+                          final hasErr = err != null && err.isNotEmpty;
+                          final name = selectedPlatform.toUpperCase();
+                          showAppMessage(
+                            this.context,
+                            hasErr
+                                ? '$name key added, but model sync failed — try again shortly'
+                                : synced > 0
+                                    ? '$name added — $synced models synced'
+                                    : '$name key added',
+                            isError: hasErr,
+                          );
                         }
                         _loadKeys();
                       } catch (e) {

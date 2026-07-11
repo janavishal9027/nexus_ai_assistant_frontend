@@ -26,6 +26,11 @@ class ChatProvider extends ChangeNotifier {
   // Web Search mode: forces a live web search for this turn. Mutually
   // exclusive with Deep Research (only one mode active at a time).
   bool _webSearch = false;
+  // A "new chat" branch that hasn't been saved yet — it's created on the backend
+  // only when the user actually sends a message, so branching without asking
+  // anything never leaves a duplicate chat behind.
+  int? _pendingBranchSource;
+  int? _pendingBranchUpTo;
 
   // In-flight generation control (cancel / timeout).
   StreamSubscription<Map<String, dynamic>>? _activeSub;
@@ -139,6 +144,8 @@ class ChatProvider extends ChangeNotifier {
   }
 
   Future<void> selectConversation(int id) async {
+    _pendingBranchSource = null;
+    _pendingBranchUpTo = null;
     try {
       _currentConversationId = id;
       final conv = await ApiService.getConversation(id);
@@ -153,6 +160,8 @@ class ChatProvider extends ChangeNotifier {
 
   void startNewChat() {
     _currentConversationId = null;
+    _pendingBranchSource = null;
+    _pendingBranchUpTo = null;
     _messages = [];
     _currentModel = null;
     _currentPlatform = null;
@@ -162,6 +171,21 @@ class ChatProvider extends ChangeNotifier {
 
   Future<void> sendMessage(String content) async {
     if (content.trim().isEmpty) return;
+
+    // Materialize a pending "new chat" branch on the first message: create the
+    // branch on the backend now (copying the history up to the branch point) so
+    // it only becomes a real conversation once the user actually asks something.
+    if (_pendingBranchSource != null) {
+      try {
+        _currentConversationId = await ApiService.branchConversation(
+            _pendingBranchSource!, _pendingBranchUpTo!);
+        await loadConversations(); // surface the new branch in the sidebar
+      } catch (_) {
+        _currentConversationId = null; // fall back to a plain new chat
+      }
+      _pendingBranchSource = null;
+      _pendingBranchUpTo = null;
+    }
 
     _messages.add(Message(role: 'user', content: content));
     _isLoading = true;
@@ -367,6 +391,71 @@ class ChatProvider extends ChangeNotifier {
     await sendMessage(text);
   }
 
+  /// Retry an assistant reply: re-run the user turn that produced the message at
+  /// [assistantIndex], optionally pinned to [modelId] (its original model) so it
+  /// regenerates with the same model. The user's global model choice is restored
+  /// afterwards.
+  Future<void> regenerate(int assistantIndex, {String? modelId}) async {
+    if (_isLoading) return;
+    if (assistantIndex <= 0 || assistantIndex >= _messages.length) return;
+    final userIndex = assistantIndex - 1;
+    if (_messages[userIndex].role != 'user') return;
+    final userText = _messages[userIndex].content;
+    final prev = _selectedModel;
+    if (modelId != null && modelId.isNotEmpty) _selectedModel = modelId;
+    try {
+      await editAndResend(userIndex, userText);
+    } finally {
+      _selectedModel = prev;
+      notifyListeners();
+    }
+  }
+
+  /// Resolve a model's display name (as shown on a message badge) back to its
+  /// id, so a retry can request the same model. Null if it can't be found.
+  String? modelIdForName(String? name) {
+    if (name == null || name.isEmpty) return null;
+    for (final m in availableModels) {
+      if (m['name']?.toString() == name || m['id']?.toString() == name) {
+        return m['id']?.toString();
+      }
+    }
+    return null;
+  }
+
+  /// Branch this conversation's history (up to message index [messageIndex],
+  /// inclusive) into another chat — a brand-new one ([targetId] null) or an
+  /// existing target — then switch to it. Returns the target conversation id.
+  Future<int?> branchTo(int messageIndex, {int? targetId}) async {
+    final cid = _currentConversationId;
+    if (cid == null) return null;
+    if (targetId != null) {
+      // Branch into an existing chat: append immediately and switch to it.
+      try {
+        final newId = await ApiService.branchConversation(cid, messageIndex,
+            targetConversationId: targetId);
+        await loadConversations();
+        await selectConversation(newId);
+        return newId;
+      } catch (_) {
+        _error = 'Could not branch this chat';
+        notifyListeners();
+        return null;
+      }
+    }
+    // New-chat branch: DON'T create a conversation yet. Open the copied history
+    // as an unsaved draft; it's saved (and appears in the sidebar) only when the
+    // user actually sends a message — so an empty branch never clutters the list.
+    final upto = (messageIndex + 1).clamp(0, _messages.length);
+    _pendingBranchSource = cid;
+    _pendingBranchUpTo = messageIndex;
+    _currentConversationId = null;
+    _messages = _messages.sublist(0, upto);
+    _error = null;
+    notifyListeners();
+    return null;
+  }
+
   /// Cancel an in-flight generation. Closes the socket immediately (works even
   /// if no tokens have arrived yet) and keeps any partial text already streamed.
   Future<void> stopGeneration() async {
@@ -428,15 +517,25 @@ class ChatProvider extends ChangeNotifier {
   Future<void> deleteConversation(int id) async {
     try {
       await ApiService.deleteConversation(id);
-      _conversations.removeWhere((c) => c.id == id);
-      if (_currentConversationId == id) {
+      await loadConversations(); // reflect cascade-deleted branches
+      if (_currentConversationId != null &&
+          !_conversations.any((c) => c.id == _currentConversationId)) {
         startNewChat();
+      } else {
+        notifyListeners();
       }
-      notifyListeners();
     } catch (e) {
       _error = e.toString();
       notifyListeners();
     }
+  }
+
+  /// Promote a branch to a top-level chat (used when the user unchecks a branch
+  /// in the parent's delete dialog so it survives instead of being deleted).
+  Future<void> detachConversation(int id) async {
+    try {
+      await ApiService.detachConversation(id);
+    } catch (_) {}
   }
 
   Future<void> renameConversation(int id, String title) async {

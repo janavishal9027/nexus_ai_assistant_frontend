@@ -8,10 +8,11 @@ import '../widgets/sidebar.dart';
 import '../widgets/resize_handle.dart';
 import 'settings_screen.dart';
 import 'profile_screen.dart';
+import 'guide_screen.dart';
 
 /// Which panel the main content area shows (master-detail with the sidebar).
 /// Settings is a separate full-screen route, so it isn't a view here.
-enum _MainView { chat, profile }
+enum _MainView { chat, profile, guide }
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -71,7 +72,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final isWide = MediaQuery.of(context).size.width > 768;
 
     return Scaffold(
-      body: Builder(
+      // SafeArea keeps the top bar (menu / model / settings) below the mobile
+      // status bar; no-op on desktop. bottom:false leaves the input's own
+      // bottom padding to handle the nav bar.
+      body: SafeArea(bottom: false, child: Builder(
         builder: (scaffoldContext) => Row(
           children: [
             // Unified conversation sidebar (brand, nav, conversations, bottom
@@ -85,6 +89,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 onOpenChat: () => setState(() => _view = _MainView.chat),
                 onOpenProfile: () => setState(() => _view = _MainView.profile),
                 onOpenSettings: _openSettingsRoute,
+                onOpenGuide: () => setState(() => _view = _MainView.guide),
               ),
               ResizeHandle(
                 onDrag: (dx) => setState(() =>
@@ -101,6 +106,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   setState(() => _view = _MainView.chat);
                 },
                 onSearch: () => setState(() => _sidebarOpen = true),
+                onGuide: () => setState(() => _view = _MainView.guide),
                 onProfile: () => setState(() => _view = _MainView.profile),
                 onSettings: _openSettingsRoute,
               ),
@@ -110,25 +116,27 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ],
         ),
-      ),
+      )),
       // Mobile drawer
       drawer: isWide
           ? null
           : Drawer(
-              child: Sidebar(
+              child: SafeArea(child: Sidebar(
                 isDrawer: true,
                 onClose: () => Navigator.of(context).pop(),
                 activeView: _viewName,
                 onOpenChat: () => setState(() => _view = _MainView.chat),
                 onOpenProfile: () => setState(() => _view = _MainView.profile),
                 onOpenSettings: _openSettingsRoute,
-              ),
+                onOpenGuide: () => setState(() => _view = _MainView.guide),
+              )),
             ),
     );
   }
 
   String get _viewName => switch (_view) {
         _MainView.profile => 'profile',
+        _MainView.guide => 'guide',
         _MainView.chat => 'chat',
       };
 
@@ -143,12 +151,23 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Jump straight to Settings → API Keys (used by the no-keys onboarding to
+  /// guide a fresh install to add its first provider key).
+  void _openApiKeys() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+          builder: (_) => const SettingsScreen(initialSection: 2)),
+    );
+  }
+
   /// The main panel: chat, or the embedded Profile screen whose back button
   /// returns here (keeping the sidebar in place).
   Widget _mainContent(BuildContext context, bool isWide) {
     switch (_view) {
       case _MainView.profile:
         return ProfileScreen(onBack: _backToChat);
+      case _MainView.guide:
+        return GuideScreen(onBack: _backToChat);
       case _MainView.chat:
         return _buildChatArea(context, isWide);
     }
@@ -157,6 +176,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildChatArea(BuildContext context, bool isWide) {
     final theme = Theme.of(context);
     final chatProvider = context.watch<ChatProvider>();
+    // Fresh install with no provider keys → lock chat and guide the user to
+    // add at least one key. Gate on configLoaded so we don't flash the locked
+    // state during the initial load.
+    final noKeys =
+        chatProvider.configLoaded && chatProvider.activeProviders.isEmpty;
 
     return Column(
       children: [
@@ -166,12 +190,14 @@ class _ChatScreenState extends State<ChatScreen> {
         Divider(height: 1, color: theme.colorScheme.outline.withValues(alpha: 0.3)),
         // Messages
         Expanded(
-          child: chatProvider.messages.isEmpty
-              ? _buildEmptyState(theme)
-              : _buildMessageList(chatProvider),
+          child: noKeys
+              ? _buildNoKeysState(theme)
+              : chatProvider.messages.isEmpty
+                  ? _buildEmptyState(theme)
+                  : _buildMessageList(chatProvider),
         ),
-        // Error display
-        if (chatProvider.error != null)
+        // Error display (hidden while locked — the onboarding covers it)
+        if (!noKeys && chatProvider.error != null)
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             padding: const EdgeInsets.all(12),
@@ -213,6 +239,8 @@ class _ChatScreenState extends State<ChatScreen> {
           onToggleDeepResearch: chatProvider.toggleDeepResearch,
           webSearch: chatProvider.webSearch,
           onToggleWebSearch: chatProvider.toggleWebSearch,
+          locked: noKeys,
+          onLockedTap: _openApiKeys,
         ),
       ],
     );
@@ -292,6 +320,8 @@ class _ChatScreenState extends State<ChatScreen> {
     return PopupMenuButton<String>(
       onSelected: chatProvider.setSelectedModel,
       offset: const Offset(0, 40),
+      constraints:
+          const BoxConstraints(maxHeight: 460, minWidth: 300, maxWidth: 360),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -308,9 +338,7 @@ class _ChatScreenState extends State<ChatScreen> {
             const SizedBox(width: 6),
             Flexible(
               child: Text(
-                chatProvider.selectedModel == 'auto'
-                    ? 'Auto'
-                    : _shortenModelName(chatProvider.selectedModel),
+                _selectedLabel(chatProvider.selectedModel),
                 style: theme.textTheme.bodySmall?.copyWith(
                   fontWeight: FontWeight.w500,
                 ),
@@ -324,10 +352,29 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       ),
       itemBuilder: (context) {
+        final primary = theme.colorScheme.primary;
+        final selected = chatProvider.selectedModel;
+        // Number of models per provider, for the section headers.
+        final modelCounts = <String, int>{};
+        for (final m in models) {
+          final p = m['platform']?.toString() ?? '';
+          modelCounts[p] = (modelCounts[p] ?? 0) + 1;
+        }
         final items = <PopupMenuEntry<String>>[
-          const PopupMenuItem(
+          PopupMenuItem(
             value: 'auto',
-            child: Text('Auto (Best Available)'),
+            height: 42,
+            child: Row(children: [
+              Icon(Icons.auto_awesome, size: 15, color: primary),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text('Auto (Best Available)',
+                    style:
+                        TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+              ),
+              if (selected == 'auto')
+                Icon(Icons.check, size: 15, color: primary),
+            ]),
           ),
           const PopupMenuDivider(),
         ];
@@ -339,31 +386,168 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Text('Add API keys in Settings to unlock models',
                 style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic)),
           ));
-        } else {
-          // Group by platform
-          String? lastPlatform;
-          for (final model in models) {
-            if (model['platformName'] != lastPlatform) {
-              lastPlatform = model['platformName'];
-              items.add(PopupMenuItem(
-                enabled: false,
-                value: '',
-                child: Text(
-                  (lastPlatform ?? '').toUpperCase(),
-                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
-                ),
-              ));
-            }
-            items.add(PopupMenuItem(
-              value: model['id']?.toString() ?? '',
-              child: Text(model['name']?.toString() ?? 'Unknown', style: const TextStyle(fontSize: 13)),
-            ));
-          }
+          return items;
         }
 
+        // Group by provider: a header, a provider-scoped "Auto", then the
+        // provider's chat models (smallest → largest, from the backend).
+        String? lastPlatform;
+        for (final model in models) {
+          final platform = model['platform']?.toString() ?? '';
+          final platformName = model['platformName']?.toString() ?? '';
+          if (platform != lastPlatform) {
+            lastPlatform = platform;
+            items.add(PopupMenuItem(
+              enabled: false,
+              value: '',
+              height: 30,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      platformName.toUpperCase(),
+                      style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 0.6,
+                          color: theme.colorScheme.onSurface
+                              .withValues(alpha: 0.5)),
+                    ),
+                  ),
+                  Text(
+                    '${modelCounts[platform] ?? 0} models',
+                    style: TextStyle(
+                        fontSize: 10,
+                        color:
+                            theme.colorScheme.onSurface.withValues(alpha: 0.4)),
+                  ),
+                ],
+              ),
+            ));
+            final pAuto = 'auto:$platform';
+            items.add(PopupMenuItem(
+              value: pAuto,
+              height: 40,
+              child: Row(children: [
+                Icon(Icons.auto_awesome, size: 14, color: primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text('Auto · best $platformName model',
+                      style: const TextStyle(fontSize: 12.5)),
+                ),
+                if (selected == pAuto)
+                  Icon(Icons.check, size: 14, color: primary),
+              ]),
+            ));
+          }
+          items.add(_modelMenuItem(theme, model, selected));
+        }
         return items;
       },
     );
+  }
+
+  /// A single model row: name + parameter-size badge + cost badge (+ check).
+  PopupMenuItem<String> _modelMenuItem(
+      ThemeData theme, Map<String, dynamic> model, String selected) {
+    final id = model['id']?.toString() ?? '';
+    final name = model['name']?.toString() ?? 'Unknown';
+    final pb = model['param_billions'];
+    final cost = model['cost']?.toString() ?? '';
+    final isSel = id == selected;
+    return PopupMenuItem<String>(
+      value: id,
+      height: 40,
+      child: Row(children: [
+        Expanded(
+          child: Text(name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: isSel ? FontWeight.w600 : FontWeight.w400)),
+        ),
+        const SizedBox(width: 6),
+        _sizeBadge(theme, pb, model['tier']?.toString()),
+        const SizedBox(width: 6),
+        _costBadge(theme, cost),
+        if (isSel) ...[
+          const SizedBox(width: 4),
+          Icon(Icons.check, size: 14, color: theme.colorScheme.primary),
+        ],
+      ]),
+    );
+  }
+
+  /// Size badge: the parameter count when it's known (e.g. "8B", "120B", "1T"),
+  /// otherwise the size tier (Frontier / Large / Medium / Small) — closed models
+  /// like Claude, GPT and Grok don't publish parameter counts, so every model
+  /// still shows a size indicator instead of a blank.
+  Widget _sizeBadge(ThemeData theme, dynamic pb, String? tier) {
+    String? label;
+    if (pb is num) {
+      if (pb >= 1000) {
+        final t = pb / 1000;
+        label = t == t.roundToDouble()
+            ? '${t.toStringAsFixed(0)}T'
+            : '${t.toStringAsFixed(1)}T';
+      } else {
+        label = '${pb.round()}B';
+      }
+    } else if (tier != null && tier.isNotEmpty) {
+      label = tier;
+    }
+    if (label == null) return const SizedBox.shrink();
+    return Text(label,
+        style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.5)));
+  }
+
+  /// Colored billing hint: Free (teal), Credit (amber) or Paid (blue).
+  Widget _costBadge(ThemeData theme, String cost) {
+    final Color c;
+    final String label;
+    switch (cost) {
+      case 'free':
+        c = const Color(0xFF10A37F);
+        label = 'Free';
+        break;
+      case 'credit':
+        c = const Color(0xFFF59E0B);
+        label = 'Credit';
+        break;
+      case 'paid':
+        c = const Color(0xFF3B82F6);
+        label = 'Paid';
+        break;
+      default:
+        return const SizedBox.shrink();
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(label,
+          style:
+              TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: c)),
+    );
+  }
+
+  /// Label for the selector button: "Auto", "Groq · Auto", or a model name.
+  String _selectedLabel(String selected) {
+    if (selected == 'auto') return 'Auto';
+    if (selected.startsWith('auto:')) {
+      final plat = selected.substring(5);
+      final p = context.read<ChatProvider>().providers.firstWhere(
+          (x) => x['id']?.toString() == plat,
+          orElse: () => const <String, dynamic>{});
+      return '${p['name']?.toString() ?? plat} · Auto';
+    }
+    return _shortenModelName(selected);
   }
 
   String _shortenModelName(String modelId) {
@@ -375,6 +559,73 @@ class _ChatScreenState extends State<ChatScreen> {
     // Fallback: last segment
     final parts = modelId.split('/');
     return parts.last.replaceAll(':free', '');
+  }
+
+  /// Shown when the account has no active provider keys: chat is locked, so
+  /// guide the user to add their first key.
+  Widget _buildNoKeysState(ThemeData theme) {
+    final primary = theme.colorScheme.primary;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 76,
+                height: 76,
+                decoration: BoxDecoration(
+                  color: primary.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.vpn_key_outlined, size: 34, color: primary),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                'Add a provider to start chatting',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.headlineSmall
+                    ?.copyWith(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Nexus AI routes your messages across LLM providers, but it needs '
+                'at least one API key first. Most have a free tier — Groq is fast '
+                'and free to start.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  height: 1.5,
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.65),
+                ),
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: _openApiKeys,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add API Key'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: primary,
+                  foregroundColor: theme.colorScheme.onPrimary,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+                ),
+              ),
+              const SizedBox(height: 6),
+              TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                      builder: (_) => const SettingsScreen(initialSection: 3)),
+                ),
+                child: Text('See supported providers',
+                    style: TextStyle(color: primary)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildEmptyState(ThemeData theme) {

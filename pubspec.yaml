@@ -20,6 +20,11 @@ dependencies:
   flutter_highlight: ^0.7.0
   markdown: ^7.3.1
   forui: ^0.23.0
+  # Official brand icons (WhatsApp, LinkedIn, Reddit …) for the share dialog.
+  font_awesome_flutter: ^11.0.0
+  # Cross-platform URL / app launching (browser, WhatsApp, provider key pages).
+  # dart:io Process only works on desktop; this covers Android + iOS too.
+  url_launcher: ^6.3.0
 
 dev_dependencies:
   flutter_test:

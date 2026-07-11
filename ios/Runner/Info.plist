@@ -66,5 +66,23 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- Allow reaching the self-hosted backend over plain HTTP/WS (mirrors the
+	     Android manifest's android:usesCleartextTraffic="true"). iOS blocks
+	     non-HTTPS traffic by default via App Transport Security. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<!-- URL schemes the app opens via url_launcher. iOS 9+ requires each
+	     non-http scheme to be declared here or canLaunchUrl/launchUrl fails. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>https</string>
+		<string>http</string>
+		<string>whatsapp</string>
+		<string>mailto</string>
+		<string>tel</string>
+	</array>
 </dict>
 </plist>

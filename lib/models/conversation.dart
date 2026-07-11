@@ -3,6 +3,7 @@ class Conversation {
   final String title;
   final DateTime createdAt;
   final DateTime? updatedAt;
+  final int? parentId; // source conversation, if this is a branch
   final List<Message>? messages;
 
   Conversation({
@@ -10,6 +11,7 @@ class Conversation {
     required this.title,
     required this.createdAt,
     this.updatedAt,
+    this.parentId,
     this.messages,
   });
 
@@ -23,6 +25,7 @@ class Conversation {
       updatedAt: json['updated_at'] != null
           ? DateTime.parse(json['updated_at'])
           : null,
+      parentId: json['parent_id'],
       messages: json['messages'] != null
           ? (json['messages'] as List).map((m) => Message.fromJson(m)).toList()
           : null,

@@ -11,6 +11,10 @@ class ChatInput extends StatefulWidget {
   final VoidCallback? onToggleDeepResearch;
   final bool webSearch;
   final VoidCallback? onToggleWebSearch;
+  // When true the composer is locked (no provider API key yet) and tapping it
+  // guides the user to add one.
+  final bool locked;
+  final VoidCallback? onLockedTap;
 
   const ChatInput({
     super.key,
@@ -21,6 +25,8 @@ class ChatInput extends StatefulWidget {
     this.onToggleDeepResearch,
     this.webSearch = false,
     this.onToggleWebSearch,
+    this.locked = false,
+    this.onLockedTap,
   });
 
   @override
@@ -200,6 +206,8 @@ class _ChatInputState extends State<ChatInput> {
     final baseFill = theme.inputDecorationTheme.fillColor ??
         (isDark ? const Color(0xFF1E1E1E) : const Color(0xFFF2F2F3));
 
+    if (widget.locked) return _lockedBar(theme, primary, baseFill);
+
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
       child: Center(
@@ -213,10 +221,12 @@ class _ChatInputState extends State<ChatInput> {
               color: baseFill,
               borderRadius: BorderRadius.circular(28),
               border: Border.all(
+                // Subtle teal frame at rest (matches the locked bar), a
+                // stronger teal when focused or a mode is on.
                 color: active
                     ? primary.withValues(alpha: 0.75)
-                    : theme.colorScheme.outline.withValues(alpha: 0.35),
-                width: active ? 1.5 : 1,
+                    : primary.withValues(alpha: 0.45),
+                width: active ? 1.5 : 1.2,
               ),
               boxShadow: [
                 // Soft lift off the message list, plus a gentle primary glow
@@ -279,6 +289,70 @@ class _ChatInputState extends State<ChatInput> {
                 const SizedBox(width: 4),
                 _sendButton(theme),
               ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Replaces the composer when there are no provider keys: a tappable bar
+  /// that guides the user to Settings → API Keys.
+  Widget _lockedBar(ThemeData theme, Color primary, Color baseFill) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: kContentMaxWidth),
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: widget.onLockedTap,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: baseFill,
+                  borderRadius: BorderRadius.circular(28),
+                  border: Border.all(
+                      color: primary.withValues(alpha: 0.45), width: 1.2),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.lock_outline, size: 20, color: primary),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Add a provider API key in Settings to start chatting',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurface
+                              .withValues(alpha: 0.75),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: primary,
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      child: Text(
+                        'Add Key',
+                        style: TextStyle(
+                          color: theme.colorScheme.onPrimary,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
         ),

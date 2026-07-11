@@ -347,6 +347,38 @@ class ApiService {
     }
   }
 
+  /// Branch a conversation's history (messages up to index [upTo], inclusive)
+  /// into another chat — a brand-new one ([targetConversationId] null) or an
+  /// existing target. Returns the target conversation id.
+  static Future<int> branchConversation(int id, int upTo,
+      {int? targetConversationId}) async {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/api/conversations/$id/branch'),
+      headers: _headers(),
+      body: jsonEncode({
+        'up_to': upTo,
+        if (targetConversationId != null)
+          'target_conversation_id': targetConversationId,
+      }),
+    );
+    if (response.statusCode == 200) {
+      return (jsonDecode(response.body)['conversation_id'] as num).toInt();
+    }
+    throw Exception('Failed to branch conversation (HTTP ${response.statusCode})');
+  }
+
+  /// Promote a branch to a top-level chat (clears its parent link), so it
+  /// survives when its parent is deleted.
+  static Future<void> detachConversation(int id) async {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/api/conversations/$id/detach'),
+      headers: _headers(),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Failed to detach conversation (HTTP ${response.statusCode})');
+    }
+  }
+
   // ─── Keys ─────────────────────────────────────────────────────────────
   static Future<List<Map<String, dynamic>>> getKeys() async {
     final response = await http.get(Uri.parse('$_baseUrl/api/keys/'), headers: _headers(json: false));
@@ -357,7 +389,11 @@ class ApiService {
     return [];
   }
 
-  static Future<void> addKey(String platform, String key, {String? label}) async {
+  /// Adds a provider key. Returns the response body, which includes
+  /// `models_synced` (how many of that provider's models were synced) and
+  /// `sync_error` (non-null if the model fetch failed).
+  static Future<Map<String, dynamic>> addKey(String platform, String key,
+      {String? label}) async {
     final response = await http.post(
       Uri.parse('$_baseUrl/api/keys/'),
       headers: _headers(),
@@ -370,6 +406,12 @@ class ApiService {
         if (body is Map && body['detail'] != null) detail = body['detail'].toString();
       } catch (_) {}
       throw Exception(detail);
+    }
+    try {
+      final body = jsonDecode(response.body);
+      return body is Map<String, dynamic> ? body : <String, dynamic>{};
+    } catch (_) {
+      return <String, dynamic>{};
     }
   }
 
