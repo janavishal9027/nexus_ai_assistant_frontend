@@ -71,6 +71,10 @@ class Message {
   // Files attached to this (user) turn — shown as chips/thumbnails on the
   // bubble. Not populated when reloading history from the server.
   final List<ChatAttachment>? attachments;
+  // Export formats the user asked for (e.g. ['word','pdf']) — the assistant
+  // bubble shows a one-click download button for each. Set only on freshly
+  // generated answers whose request named a downloadable format.
+  final List<String>? downloadFormats;
 
   Message({
     required this.role,
@@ -80,6 +84,7 @@ class Message {
     this.isStreaming = false,
     this.activity,
     this.attachments,
+    this.downloadFormats,
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
@@ -106,6 +111,7 @@ class Message {
     bool? isStreaming,
     AgentActivity? activity,
     List<ChatAttachment>? attachments,
+    List<String>? downloadFormats,
   }) {
     return Message(
       role: role ?? this.role,
@@ -115,6 +121,7 @@ class Message {
       isStreaming: isStreaming ?? this.isStreaming,
       activity: activity ?? this.activity,
       attachments: attachments ?? this.attachments,
+      downloadFormats: downloadFormats ?? this.downloadFormats,
     );
   }
 }

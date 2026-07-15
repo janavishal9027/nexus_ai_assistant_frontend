@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 import 'package:provider/provider.dart';
@@ -5,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
 import '../providers/auth_provider.dart';
 import '../services/api_service.dart';
+import '../services/exporter.dart';
 import '../widgets/resize_handle.dart';
 import '../widgets/nav_tile.dart';
 import '../utils/app_feedback.dart';
@@ -29,6 +32,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _loading = true;
   int _section = 0;
   String _keyQuery = '';
+  // Memory & Privacy section (Part D).
+  Map<String, dynamic>? _memory;
+  bool _memoryLoading = false;
 
   // Drag-resizable section-nav width (persisted).
   static const double _minRail = 180, _maxRail = 360;
@@ -49,6 +55,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     (icon: Icons.dns_outlined, label: 'Server'),
     (icon: Icons.key_outlined, label: 'API Keys'),
     (icon: Icons.hub_outlined, label: 'Providers'),
+    (icon: Icons.psychology_outlined, label: 'Memory'),
     (icon: Icons.info_outline, label: 'About'),
   ];
 
@@ -266,6 +273,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return _apiKeysSection(theme);
       case 3:
         return _providersSection(theme);
+      case 4:
+        return _memorySection(theme);
       default:
         return _aboutSection(theme);
     }
@@ -715,6 +724,151 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   static const String _appVersion = '1.0.0';
+
+  // ── Memory & Privacy (Part D) ─────────────────────────────────────────────
+  Widget _memorySection(ThemeData theme) {
+    if (_memory == null && !_memoryLoading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadMemory());
+    }
+    final counts = (_memory?['counts'] as Map?) ?? const {};
+    final skills = ((_memory?['skills'] as List?) ?? const []).cast<Map>();
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        _header(theme, 'Memory & Privacy', 'What Nexus AI remembers about you'),
+        const SizedBox(height: 10),
+        if (_memoryLoading) const LinearProgressIndicator(minHeight: 2),
+        const SizedBox(height: 6),
+        Row(children: [
+          _memStat(theme, '${counts['episodic'] ?? 0}', 'memories'),
+          _memStat(theme, '${counts['skills'] ?? 0}', 'skills'),
+          _memStat(theme, '${counts['feedback'] ?? 0}', 'feedback'),
+        ]),
+        const SizedBox(height: 18),
+        if (skills.isNotEmpty) ...[
+          _sectionLabel(theme, 'What I know about you'),
+          ...skills.take(12).map((s) => _skillTile(theme, s)),
+          const SizedBox(height: 18),
+        ],
+        Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _exportMemory,
+              icon: const Icon(Icons.download_outlined, size: 18),
+              label: const Text('Export my memory'),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _clearMemory,
+              icon: const Icon(Icons.delete_outline, size: 18, color: Colors.red),
+              label: const Text('Clear my memory', style: TextStyle(color: Colors.red)),
+              style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: Colors.red.withValues(alpha: 0.4))),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 12),
+        Text(
+          'Nexus AI keeps durable, per-account memory to personalize help — recent '
+          'exchanges plus skills it distils about you. Recall is scoped to your '
+          'account; you can export or clear it anytime.',
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.onSurface.withValues(alpha: 0.6)),
+        ),
+      ],
+    );
+  }
+
+  Widget _memStat(ThemeData theme, String value, String label) {
+    return Expanded(
+      child: Container(
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(children: [
+          Text(value, style: theme.textTheme.headlineSmall
+              ?.copyWith(fontWeight: FontWeight.bold)),
+          Text(label, style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _skillTile(ThemeData theme, Map s) {
+    final kind = (s['kind'] ?? 'note').toString();
+    final content = (s['content'] ?? '').toString();
+    final c = (s['polarity']?.toString() == 'negative')
+        ? Colors.orange
+        : theme.colorScheme.primary;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(
+          margin: const EdgeInsets.only(top: 2, right: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+          decoration: BoxDecoration(
+              color: c.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(6)),
+          child: Text(kind, style: TextStyle(
+              fontSize: 10, color: c, fontWeight: FontWeight.w600)),
+        ),
+        Expanded(child: Text(content, style: theme.textTheme.bodyMedium)),
+      ]),
+    );
+  }
+
+  Future<void> _loadMemory() async {
+    setState(() => _memoryLoading = true);
+    final m = await ApiService.getMemorySummary();
+    if (mounted) setState(() { _memory = m; _memoryLoading = false; });
+  }
+
+  Future<void> _exportMemory() async {
+    final data = await ApiService.exportMemory();
+    if (!mounted) return;
+    if (data == null) {
+      showAppMessage(context, 'Export failed', isError: true);
+      return;
+    }
+    final bytes = Uint8List.fromList(
+        utf8.encode(const JsonEncoder.withIndent('  ').convert(data)));
+    await saveExport(context, bytes, 'nexus-memory.json');
+  }
+
+  Future<void> _clearMemory() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear all memory?'),
+        content: const Text(
+            'This permanently deletes everything Nexus AI has learned about you '
+            '— memories, skills, and feedback. This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Clear everything'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final done = await ApiService.purgeMemory(scope: 'all');
+    if (!mounted) return;
+    if (done) {
+      showAppMessage(context, 'Memory cleared');
+      _loadMemory();
+    } else {
+      showAppMessage(context, 'Failed to clear memory', isError: true);
+    }
+  }
 
   Widget _aboutSection(ThemeData theme) {
     final muted = theme.colorScheme.onSurface.withValues(alpha: 0.7);

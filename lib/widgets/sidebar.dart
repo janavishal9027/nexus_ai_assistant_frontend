@@ -82,6 +82,9 @@ class _SidebarState extends State<Sidebar> {
   final Set<int> _expanded = {};
   // Whole "Projects" section collapsed via its header chevron.
   bool _projectsOpen = true;
+  // Individual projects whose chat list is expanded inline. Tapping a project
+  // row toggles it (collapsed by default) — its chats show/hide underneath.
+  final Set<int> _expandedProjects = {};
 
   @override
   void initState() {
@@ -114,14 +117,17 @@ class _SidebarState extends State<Sidebar> {
   }
 
   void _goSettings() {
+    // Close the drawer FIRST (mobile), then open Settings. Doing it the other
+    // way round pops the just-pushed Settings route when the drawer closes
+    // (they share one Navigator) — which is why Settings wouldn't open from the
+    // side navigation on Android/iOS.
+    _afterNav();
     if (widget.onOpenSettings != null) {
       widget.onOpenSettings!();
-      _afterNav();
     } else {
       Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => const SettingsScreen()),
       );
-      _afterNav();
     }
   }
 
@@ -529,37 +535,63 @@ class _SidebarState extends State<Sidebar> {
     );
   }
 
-  // A project row followed by its chats nested underneath (like the reference
-  // sidebar). No chevron — the chats are always shown; the row opens the page.
+  // A project row; when expanded, its chats are nested underneath. Tapping the
+  // row toggles expansion (collapsed by default) — "Open project" (its page)
+  // lives in the ⋯ menu.
   List<Widget> _projectBlock(
       BuildContext context, ChatProvider chatProvider, Project p) {
+    final expanded = _expandedProjects.contains(p.id);
+    final row = _projectRow(context, chatProvider, p);
+    if (!expanded) return [row];
     final convs = chatProvider.conversations
         .where((c) => c.projectId == p.id)
         .toList()
       ..sort((a, b) =>
           (b.updatedAt ?? b.createdAt).compareTo(a.updatedAt ?? a.createdAt));
     return [
-      _projectRow(context, chatProvider, p),
-      for (final c in convs)
-        _convTile(context, chatProvider,
-            (conv: c, depth: 0, hasChildren: false),
-            extraDepth: 1, plainIndent: true),
+      row,
+      if (convs.isEmpty)
+        _projectEmptyHint(context)
+      else
+        for (final c in convs)
+          _convTile(context, chatProvider,
+              (conv: c, depth: 0, hasChildren: false),
+              extraDepth: 1, plainIndent: true),
     ];
   }
 
-  // A project is a single row that opens its page. The row is highlighted while
-  // it holds the currently-open chat, and is a drop target for dragged chats.
+  /// Shown under an expanded project that has no chats yet.
+  Widget _projectEmptyHint(BuildContext context) {
+    final colors = context.theme.colors;
+    final typography = context.theme.typography;
+    return Padding(
+      padding: const EdgeInsets.only(left: 46, right: 8, top: 1, bottom: 4),
+      child: Text('No chats yet',
+          style: typography.body.xs
+              .copyWith(color: colors.mutedForeground, fontStyle: FontStyle.italic)),
+    );
+  }
+
+  // A project is a single row that toggles its chat list. The row is highlighted
+  // while it holds the currently-open chat, and is a drop target for dragged chats.
   Widget _projectRow(BuildContext context, ChatProvider chatProvider, Project p) {
     final isActive = chatProvider.conversations.any(
         (c) => c.projectId == p.id && c.id == chatProvider.currentConversationId);
     // Drop target: a chat dragged here is moved into this project.
     return DragTarget<Conversation>(
       onWillAcceptWithDetails: (d) => d.data.projectId != p.id,
-      onAcceptWithDetails: (d) => _assignProject(context, d.data, p.id),
+      onAcceptWithDetails: (d) {
+        _assignProject(context, d.data, p.id);
+        // Reveal the freshly-filed chat by expanding the project.
+        setState(() => _expandedProjects.add(p.id));
+      },
       builder: (context, candidate, rejected) => _ProjectTile(
         project: p,
         isActive: isActive,
         dropHighlight: candidate.isNotEmpty,
+        onToggle: () => setState(() {
+          if (!_expandedProjects.remove(p.id)) _expandedProjects.add(p.id);
+        }),
         onOpen: () {
           widget.onOpenProject?.call(p);
           _afterNav();
@@ -1128,14 +1160,15 @@ class CollapsedSidebar extends StatelessWidget {
 }
 
 /// A project row (A.7): folder icon + name + a "+" new-chat button and an
-/// overflow menu (Rename / Instructions / Delete). Tapping the row opens the
-/// project page; the project holding the currently-open chat is highlighted.
-/// No inline tree/branch — that's a chat-level feature.
+/// overflow menu (Open project / Rename / Instructions / Delete). Tapping the
+/// row toggles its inline chat list (collapsed by default); the project holding
+/// the currently-open chat is highlighted.
 class _ProjectTile extends StatefulWidget {
   final Project project;
   final bool isActive;
   // A chat is currently being dragged over this project (drop target active).
   final bool dropHighlight;
+  final VoidCallback onToggle;
   final VoidCallback onOpen;
   final VoidCallback onNewChat;
   final VoidCallback onRename;
@@ -1144,6 +1177,7 @@ class _ProjectTile extends StatefulWidget {
 
   const _ProjectTile({
     required this.project,
+    required this.onToggle,
     required this.onOpen,
     required this.onNewChat,
     required this.onRename,
@@ -1182,7 +1216,7 @@ class _ProjectTileState extends State<_ProjectTile> {
         onEnter: (_) => setState(() => _hovered = true),
         onExit: (_) => setState(() => _hovered = false),
         child: InkWell(
-          onTap: widget.onOpen, // open the project page
+          onTap: widget.onToggle, // expand / collapse the chat list
           hoverColor: Colors.transparent,
           borderRadius: BorderRadius.circular(8),
           child: AnimatedContainer(
@@ -1220,12 +1254,16 @@ class _ProjectTileState extends State<_ProjectTile> {
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(10)),
                   onSelected: (v) {
+                    if (v == 'open') widget.onOpen();
                     if (v == 'newchat') widget.onNewChat();
                     if (v == 'rename') widget.onRename();
                     if (v == 'instructions') widget.onInstructions();
                     if (v == 'delete') widget.onDelete();
                   },
                   itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'open', height: 42, child: Row(children: [
+                      Icon(Icons.open_in_new_rounded, size: 18), SizedBox(width: 10), Text('Open project'),
+                    ])),
                     PopupMenuItem(value: 'newchat', height: 42, child: Row(children: [
                       Icon(Icons.add_rounded, size: 18), SizedBox(width: 10), Text('New chat'),
                     ])),

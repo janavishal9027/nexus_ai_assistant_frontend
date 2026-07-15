@@ -6,70 +6,90 @@ import '../models/clarify.dart';
 import '../providers/chat_provider.dart';
 import 'message_bubble.dart' show kContentMaxWidth;
 
-/// Docked AskUserQuestion panel (chat-module A.2). While it's shown it REPLACES
-/// the chat composer: pick an option (single = radio, multi = checkboxes) and/or
-/// type your own answer, then send with the inline "→". "Skip" answers the
-/// original message anyway.
+/// Docked AskUserQuestion panel (chat-module A.2). A request can be ambiguous in
+/// several ways, so the clarifier may ask more than one question — they're shown
+/// ONE AT A TIME (paginated) with Back / Next, and Send on the last. For each,
+/// pick an option (single = radio, multi = checkboxes) and/or type your own.
+/// "Skip" answers the original message anyway.
 ///
-/// Reliability/UX: guards against double-submit, gives keyboard support
-/// (Esc = skip, Enter = send) on desktop, haptic feedback on mobile, a smooth
-/// entrance, and copes with questions that ship no preset options.
+/// While it's shown it REPLACES the composer. It guards against double-submit,
+/// supports Esc = skip on desktop, animates in, and scrolls within the height
+/// the parent measured so it never overflows the keyboard.
 class ClarifyPanel extends StatefulWidget {
-  final ClarifyQuestion question;
+  final List<ClarifyQuestion> questions;
 
-  /// Hard height cap, measured by the parent's LayoutBuilder from the REAL
-  /// available space (body height already reduced by the keyboard). We can't
-  /// derive this from MediaQuery inside a Scaffold body: resizeToAvoidBottomInset
-  /// shrinks the body but zeroes viewInsets.bottom for descendants, so a
-  /// MediaQuery-based cap would size against the full screen and overflow.
+  /// Hard height cap, measured by the parent from the REAL available space.
   final double maxHeight;
 
-  const ClarifyPanel(
-      {super.key, required this.question, this.maxHeight = 480});
+  const ClarifyPanel({super.key, required this.questions, this.maxHeight = 480});
 
   @override
   State<ClarifyPanel> createState() => _ClarifyPanelState();
 }
 
 class _ClarifyPanelState extends State<ClarifyPanel> {
-  final Set<int> _selected = {};
-  final _otherCtrl = TextEditingController();
-  final _fieldFocus = FocusNode();
-  // Once we've handed an answer to the provider, lock the panel so a second tap
-  // (or Enter + arrow together) can't fire a duplicate turn before the panel is
-  // torn down and replaced by the composer.
+  // Per-question selected option indices + per-question free-text answer.
+  final Map<int, Set<int>> _selected = {};
+  final Map<int, TextEditingController> _other = {};
+  // The question currently on screen (paginated).
+  int _page = 0;
+  // Once we've handed the answers to the provider, lock the panel so a second
+  // tap can't fire a duplicate turn before it's torn down.
   bool _submitting = false;
+
+  int get _count => widget.questions.length;
+  bool get _isLast => _page >= _count - 1;
+
+  @override
+  void initState() {
+    super.initState();
+    for (var i = 0; i < _count; i++) {
+      _selected[i] = {};
+      _other[i] = TextEditingController();
+    }
+  }
 
   @override
   void dispose() {
-    _otherCtrl.dispose();
-    _fieldFocus.dispose();
+    for (final c in _other.values) {
+      c.dispose();
+    }
     super.dispose();
   }
 
-  bool get _canSubmit =>
-      !_submitting &&
-      (_selected.isNotEmpty || _otherCtrl.text.trim().isNotEmpty);
-
-  void _send(String answer) {
-    if (_submitting || answer.trim().isEmpty) return;
-    setState(() => _submitting = true);
-    HapticFeedback.lightImpact();
-    context.read<ChatProvider>().submitClarification(answer.trim());
+  /// The answer for question [qi]: typed text if present, else selected label(s).
+  String _answerFor(int qi) {
+    final typed = _other[qi]?.text.trim() ?? '';
+    if (typed.isNotEmpty) return typed;
+    final sel = _selected[qi] ?? const <int>{};
+    if (sel.isEmpty) return '';
+    return sel.map((i) => widget.questions[qi].options[i].label).join(', ');
   }
 
-  /// Send the typed answer if present, otherwise the selected option(s).
-  void _doSubmit() {
+  bool get _anyAnswered =>
+      List.generate(_count, _answerFor).any((a) => a.isNotEmpty);
+
+  void _next() {
     if (_submitting) return;
-    final other = _otherCtrl.text.trim();
-    if (other.isNotEmpty) {
-      _send(other);
-      return;
+    if (_isLast) {
+      _submit();
+    } else {
+      setState(() => _page++);
     }
-    if (_selected.isEmpty) return;
-    final labels =
-        _selected.map((i) => widget.question.options[i].label).toList();
-    _send(labels.join(', '));
+  }
+
+  void _back() {
+    if (_submitting || _page == 0) return;
+    setState(() => _page--);
+  }
+
+  void _submit() {
+    if (_submitting || !_anyAnswered) return;
+    setState(() => _submitting = true);
+    HapticFeedback.lightImpact();
+    context
+        .read<ChatProvider>()
+        .submitClarifications(List.generate(_count, _answerFor));
   }
 
   void _skip() {
@@ -78,18 +98,17 @@ class _ClarifyPanelState extends State<ClarifyPanel> {
     context.read<ChatProvider>().dismissClarification();
   }
 
-  void _onTapOption(int index, bool multi) {
+  void _tapOption(int qi, int oi, bool multi) {
     if (_submitting) return;
     HapticFeedback.selectionClick();
     setState(() {
+      final sel = _selected[qi]!;
       if (multi) {
-        _selected.contains(index)
-            ? _selected.remove(index)
-            : _selected.add(index);
+        sel.contains(oi) ? sel.remove(oi) : sel.add(oi);
       } else {
-        _selected
+        sel
           ..clear()
-          ..add(index);
+          ..add(oi);
       }
     });
   }
@@ -98,22 +117,10 @@ class _ClarifyPanelState extends State<ClarifyPanel> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final primary = theme.colorScheme.primary;
-    final q = widget.question;
-    final hasOptions = q.options.isNotEmpty;
-    // Cap to the real height the parent measured, and scroll the body — so it
-    // never overflows the keyboard and always leaves the messages region above
-    // it room to shrink into. A low floor is safe: the options scroll inside.
     final maxPanelHeight = widget.maxHeight.clamp(140.0, 560.0);
 
-    // Desktop keyboard support: Esc dismisses, Enter sends. The text field
-    // consumes Enter itself when focused (via onSubmitted), so these only fire
-    // when focus is elsewhere — and _submitting guards any overlap.
     return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.escape): _skip,
-        const SingleActivator(LogicalKeyboardKey.enter): _doSubmit,
-        const SingleActivator(LogicalKeyboardKey.numpadEnter): _doSubmit,
-      },
+      bindings: {const SingleActivator(LogicalKeyboardKey.escape): _skip},
       child: Focus(
         autofocus: true,
         child: TweenAnimationBuilder<double>(
@@ -139,48 +146,31 @@ class _ClarifyPanelState extends State<ClarifyPanel> {
                   border: Border.all(color: primary.withValues(alpha: 0.5)),
                   boxShadow: [
                     BoxShadow(
-                      color: primary.withValues(alpha: 0.08),
-                      blurRadius: 18,
-                      offset: const Offset(0, 4),
-                    ),
+                        color: primary.withValues(alpha: 0.08),
+                        blurRadius: 18,
+                        offset: const Offset(0, 4)),
                   ],
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    _header(theme, primary, q),
-                    const SizedBox(height: 8),
-                    // ── Scrollable: question + guidance + options ───────────
+                    _header(theme, primary),
+                    if (_count > 1) ...[
+                      const SizedBox(height: 8),
+                      _progress(theme, primary),
+                    ],
+                    const SizedBox(height: 10),
+                    // Only the current question — keyed so its field/animation
+                    // resets cleanly when the page changes.
                     Flexible(
                       child: SingleChildScrollView(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(q.question,
-                                style: theme.textTheme.bodyLarge?.copyWith(
-                                    fontWeight: FontWeight.w600, height: 1.3)),
-                            if (hasOptions) ...[
-                              const SizedBox(height: 4),
-                              Text(
-                                q.multiSelect
-                                    ? 'Select all that apply — or type your own'
-                                    : 'Choose one — or type your own',
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                    color: theme.colorScheme.onSurfaceVariant),
-                              ),
-                              const SizedBox(height: 12),
-                              ...List.generate(q.options.length,
-                                  (i) => _optionCard(theme, q.options[i], i)),
-                            ],
-                          ],
-                        ),
+                        key: ValueKey(_page),
+                        child: _questionBlock(theme, primary, _page),
                       ),
                     ),
-                    // ── Type-your-own field + inline "→" (fixed at bottom) ──
                     const SizedBox(height: 10),
-                    _otherField(theme, autofocus: !hasOptions),
+                    _navRow(theme, primary),
                   ],
                 ),
               ),
@@ -191,7 +181,8 @@ class _ClarifyPanelState extends State<ClarifyPanel> {
     );
   }
 
-  Widget _header(ThemeData theme, Color primary, ClarifyQuestion q) {
+  Widget _header(ThemeData theme, Color primary) {
+    final multi = _count > 1;
     return Row(
       children: [
         Container(
@@ -203,7 +194,7 @@ class _ClarifyPanelState extends State<ClarifyPanel> {
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             Icon(Icons.help_outline_rounded, size: 13, color: primary),
             const SizedBox(width: 4),
-            Text(q.header.toUpperCase(),
+            Text(multi ? 'A FEW QUICK QUESTIONS' : 'QUICK QUESTION',
                 style: TextStyle(
                     color: primary,
                     fontWeight: FontWeight.w700,
@@ -211,8 +202,13 @@ class _ClarifyPanelState extends State<ClarifyPanel> {
                     letterSpacing: 0.4)),
           ]),
         ),
+        if (multi) ...[
+          const SizedBox(width: 8),
+          Text('${_page + 1} of $_count',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        ],
         const Spacer(),
-        // Skip = answer the original message without clarifying.
         Tooltip(
           message: 'Answer without clarifying',
           child: TextButton(
@@ -227,15 +223,67 @@ class _ClarifyPanelState extends State<ClarifyPanel> {
     );
   }
 
-  Widget _optionCard(ThemeData theme, ClarifyOption o, int index) {
-    final primary = theme.colorScheme.primary;
-    final multi = widget.question.multiSelect;
-    final selected = _selected.contains(index);
+  /// A thin progress bar of segments — one per question, filled up to the
+  /// current page (green = answered, lighter = current/pending).
+  Widget _progress(ThemeData theme, Color primary) {
+    return Row(
+      children: [
+        for (var i = 0; i < _count; i++)
+          Expanded(
+            child: Container(
+              height: 4,
+              margin: EdgeInsets.only(right: i == _count - 1 ? 0 : 6),
+              decoration: BoxDecoration(
+                color: _answerFor(i).isNotEmpty
+                    ? primary
+                    : (i == _page
+                        ? primary.withValues(alpha: 0.5)
+                        : theme.colorScheme.outline.withValues(alpha: 0.25)),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _questionBlock(ThemeData theme, Color primary, int qi) {
+    final q = widget.questions[qi];
+    final hasOptions = q.options.isNotEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(q.question,
+            style: theme.textTheme.bodyLarge
+                ?.copyWith(fontWeight: FontWeight.w600, height: 1.3)),
+        if (hasOptions) ...[
+          const SizedBox(height: 4),
+          Text(
+            q.multiSelect
+                ? 'Select all that apply — or type your own'
+                : 'Choose one — or type your own',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 10),
+          ...List.generate(
+              q.options.length, (oi) => _optionCard(theme, primary, qi, oi)),
+        ],
+        const SizedBox(height: 6),
+        _otherField(theme, primary, qi, autofocus: !hasOptions),
+      ],
+    );
+  }
+
+  Widget _optionCard(ThemeData theme, Color primary, int qi, int oi) {
+    final o = widget.questions[qi].options[oi];
+    final multi = widget.questions[qi].multiSelect;
+    final selected = _selected[qi]?.contains(oi) ?? false;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
-        onTap: () => _onTapOption(index, multi),
+        onTap: () => _tapOption(qi, oi, multi),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 130),
           curve: Curves.easeOut,
@@ -291,61 +339,68 @@ class _ClarifyPanelState extends State<ClarifyPanel> {
     );
   }
 
-  Widget _otherField(ThemeData theme, {bool autofocus = false}) {
-    final primary = theme.colorScheme.primary;
-    final enabled = _canSubmit;
+  Widget _otherField(ThemeData theme, Color primary, int qi,
+      {bool autofocus = false}) {
+    final hasOptions = widget.questions[qi].options.isNotEmpty;
     return TextField(
-      controller: _otherCtrl,
-      focusNode: _fieldFocus,
+      controller: _other[qi],
       autofocus: autofocus,
       enabled: !_submitting,
       onChanged: (_) => setState(() {}),
-      onSubmitted: (_) => _doSubmit(),
-      textInputAction: TextInputAction.send,
+      onSubmitted: (_) => _next(),
+      textInputAction:
+          _isLast ? TextInputAction.done : TextInputAction.next,
       style: theme.textTheme.bodyMedium,
       decoration: InputDecoration(
-        hintText: widget.question.options.isEmpty
-            ? 'Type your answer…'
-            : 'Or type your own answer…',
+        hintText: hasOptions ? 'Or type your own…' : 'Type your answer…',
         isDense: true,
-        contentPadding: const EdgeInsets.fromLTRB(12, 12, 6, 12),
+        contentPadding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(10),
           borderSide: BorderSide(color: primary, width: 1.5),
         ),
-        // Inline "→" send button — sends the typed text, or the selected
-        // option(s) if the field is empty. Compact; spins while submitting.
-        suffixIconConstraints:
-            const BoxConstraints(minWidth: 36, minHeight: 36),
-        suffixIcon: Padding(
-          padding: const EdgeInsets.only(right: 6),
-          child: Tooltip(
-            message: 'Send',
-            child: Material(
-              color: enabled ? primary : primary.withValues(alpha: 0.25),
-              shape: const CircleBorder(),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: enabled ? _doSubmit : null,
-                child: Padding(
-                  padding: const EdgeInsets.all(4),
-                  child: _submitting
-                      ? SizedBox(
-                          width: 15,
-                          height: 15,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: theme.colorScheme.onPrimary),
-                        )
-                      : Icon(Icons.arrow_forward_rounded,
-                          size: 15, color: theme.colorScheme.onPrimary),
-                ),
-              ),
-            ),
-          ),
-        ),
       ),
+    );
+  }
+
+  Widget _navRow(ThemeData theme, Color primary) {
+    return Row(
+      children: [
+        if (_page > 0)
+          TextButton.icon(
+            onPressed: _submitting ? null : _back,
+            icon: const Icon(Icons.arrow_back_rounded, size: 16),
+            label: const Text('Back'),
+            style: TextButton.styleFrom(
+                foregroundColor: theme.colorScheme.onSurfaceVariant),
+          ),
+        const Spacer(),
+        if (!_isLast)
+          FilledButton.icon(
+            onPressed: _submitting ? null : _next,
+            icon: const Icon(Icons.arrow_forward_rounded, size: 16),
+            label: const Text('Next'),
+            style: FilledButton.styleFrom(
+                backgroundColor: primary,
+                foregroundColor: theme.colorScheme.onPrimary),
+          )
+        else
+          FilledButton.icon(
+            onPressed: _anyAnswered && !_submitting ? _submit : null,
+            icon: _submitting
+                ? SizedBox(
+                    width: 15,
+                    height: 15,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: theme.colorScheme.onPrimary))
+                : const Icon(Icons.check_rounded, size: 16),
+            label: const Text('Send'),
+            style: FilledButton.styleFrom(
+                backgroundColor: primary,
+                foregroundColor: theme.colorScheme.onPrimary),
+          ),
+      ],
     );
   }
 }

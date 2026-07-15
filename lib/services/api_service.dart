@@ -247,7 +247,9 @@ class ApiService {
   /// Pre-flight clarification gate (chat-module A.2). Returns a blocking
   /// question if one is needed, else null. Fails open (null) on any error so a
   /// clarifier hiccup never blocks a chat.
-  static Future<ClarifyQuestion?> clarify({
+  /// Pre-flight clarification (A.2). Returns the list of questions to ask (a
+  /// request can be ambiguous in several ways); empty if nothing to clarify.
+  static Future<List<ClarifyQuestion>> clarify({
     required String message,
     List<Message>? history,
     String? model,
@@ -264,12 +266,21 @@ class ApiService {
       );
       if (r.statusCode == 200) {
         final b = _tryJson(r.body);
-        if (b['clarify'] == true && b['question'] != null) {
-          return ClarifyQuestion.fromJson(b['question'] as Map<String, dynamic>);
+        if (b['clarify'] == true) {
+          final list = (b['questions'] as List?) ?? const [];
+          if (list.isNotEmpty) {
+            return list
+                .map((q) => ClarifyQuestion.fromJson(q as Map<String, dynamic>))
+                .toList();
+          }
+          // Backward-compat: a single `question`.
+          if (b['question'] != null) {
+            return [ClarifyQuestion.fromJson(b['question'] as Map<String, dynamic>)];
+          }
         }
       }
     } catch (_) {/* fail open */}
-    return null;
+    return const [];
   }
 
   /// Post-turn follow-up suggestions (chat-module A.2 · Suggester). Fails open.
@@ -292,6 +303,58 @@ class ApiService {
       }
     } catch (_) {/* fail open */}
     return [];
+  }
+
+  /// Persist a 👍/👎 on an assistant message (Part D memory — the Reflector
+  /// learns what lands). rating: +1 up, -1 down, 0 clears. Fails open.
+  static Future<void> submitFeedback({
+    int? conversationId,
+    int? messageIndex,
+    required int rating,
+    String? assistantText,
+  }) async {
+    try {
+      await http.post(
+        Uri.parse('$_baseUrl/api/chat/feedback'),
+        headers: _headers(),
+        body: jsonEncode({
+          'conversation_id': conversationId,
+          'message_index': messageIndex,
+          'rating': rating,
+          if (assistantText != null) 'assistant_text': assistantText,
+        }),
+      );
+    } catch (_) {/* fail open */}
+  }
+
+  // ── Part D memory lifecycle (retention / export / purge) ──────────────────
+
+  /// Counts + top skills for the "Memory & Privacy" view. Fails open.
+  static Future<Map<String, dynamic>> getMemorySummary() async {
+    try {
+      final r = await http.get(Uri.parse('$_baseUrl/api/memory'), headers: _headers());
+      if (r.statusCode == 200) return _tryJson(r.body);
+    } catch (_) {/* fail open */}
+    return {};
+  }
+
+  /// Full memory export (episodic + skills + feedback) as JSON. Null on failure.
+  static Future<Map<String, dynamic>?> exportMemory() async {
+    try {
+      final r = await http.get(Uri.parse('$_baseUrl/api/memory/export'), headers: _headers());
+      if (r.statusCode == 200) return _tryJson(r.body);
+    } catch (_) {/* fail open */}
+    return null;
+  }
+
+  /// Clear the user's memory. scope ∈ {all, episodic, skills, feedback}.
+  static Future<bool> purgeMemory({String scope = 'all'}) async {
+    try {
+      final r = await http.delete(Uri.parse('$_baseUrl/api/memory?scope=$scope'),
+          headers: _headers());
+      return r.statusCode == 200;
+    } catch (_) {/* fail open */}
+    return false;
   }
 
   /// Backend document triage (A.4): is this content export-worthy and in which
@@ -318,15 +381,24 @@ class ApiService {
 
   /// Generate a downloadable document (A.4) from answer content. Returns the
   /// file bytes and the server's suggested filename.
+  /// Export answer [content] to a downloadable file. [clean] true (the
+  /// in-response download) strips the chat wrapper to just the requested
+  /// document; false (the Export menu) keeps the whole response.
   static Future<({Uint8List bytes, String filename})> exportDocument({
     required String content,
     required String format,
     String? title,
+    bool clean = true,
   }) async {
     final r = await http.post(
       Uri.parse('$_baseUrl/api/chat/export'),
       headers: _headers(),
-      body: jsonEncode({'content': content, 'format': format, if (title != null) 'title': title}),
+      body: jsonEncode({
+        'content': content,
+        'format': format,
+        'clean': clean,
+        if (title != null) 'title': title,
+      }),
     );
     if (r.statusCode == 200) {
       final fn = r.headers['x-filename'] ?? 'document';
@@ -783,5 +855,40 @@ class ApiService {
     if (r.statusCode < 200 || r.statusCode >= 300) {
       throw Exception('Failed to move conversation (HTTP ${r.statusCode})');
     }
+  }
+
+  /// The project's auto-learned "brain": facts / decisions / conventions /
+  /// goals the assistant distilled from the project's chats (Part D Phase 4).
+  static Future<List<Map<String, dynamic>>> getProjectBrain(int projectId) async {
+    final r = await http.get(Uri.parse('$_baseUrl/api/projects/$projectId/brain'),
+        headers: _headers(json: false));
+    if (r.statusCode == 200) {
+      final entries = (jsonDecode(r.body) as Map<String, dynamic>)['entries'];
+      return (entries as List? ?? const [])
+          .map((e) => (e as Map).cast<String, dynamic>())
+          .toList();
+    }
+    return const [];
+  }
+
+  /// Prune a single brain entry.
+  static Future<void> deleteBrainEntry(int projectId, int entryId) async {
+    final r = await http.delete(
+      Uri.parse('$_baseUrl/api/projects/$projectId/brain/$entryId'),
+      headers: _headers(json: false),
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw Exception('Failed to delete brain entry (HTTP ${r.statusCode})');
+    }
+  }
+
+  /// The project's content knowledge graph: {nodes:[...], edges:[...]}.
+  static Future<Map<String, dynamic>> getProjectGraph(int projectId) async {
+    final r = await http.get(Uri.parse('$_baseUrl/api/projects/$projectId/graph'),
+        headers: _headers(json: false));
+    if (r.statusCode == 200) {
+      return (jsonDecode(r.body) as Map).cast<String, dynamic>();
+    }
+    return const {'nodes': [], 'edges': []};
   }
 }

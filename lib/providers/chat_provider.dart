@@ -57,11 +57,16 @@ class ChatProvider extends ChangeNotifier {
   // ── Clarifier (chat-module A.2) ─────────────────────────────────────────
   // A blocking clarifying question raised before the answer, plus the parked
   // original inputs so the turn can resume once it's answered.
-  ClarifyQuestion? _pendingClarify;
+  // A turn can be ambiguous in several ways, so the clarifier may ask more than
+  // one question; the panel shows them together and we resume once answered.
+  List<ClarifyQuestion> _pendingClarify = [];
   String? _clarifyOriginal;
   List<ChatAttachment>? _clarifyAttachments;
   bool _clarifyChecking = false;
-  ClarifyQuestion? get pendingClarify => _pendingClarify;
+  // Export format(s) the user asked for on THIS turn; applied to the finished
+  // answer so its bubble offers one-click downloads. Consumed each turn.
+  List<String>? _pendingDownloadFormats;
+  List<ClarifyQuestion> get pendingClarify => _pendingClarify;
   bool get clarifyChecking => _clarifyChecking;
 
   // Getters
@@ -218,13 +223,35 @@ class ChatProvider extends ChangeNotifier {
     try {
       _currentConversationId = id;
       final conv = await ApiService.getConversation(id);
-      _messages = conv.messages ?? [];
+      _messages = _withDerivedDownloads(conv.messages ?? []);
       _error = null;
       notifyListeners();
     } catch (e) {
       _error = e.toString();
       notifyListeners();
     }
+  }
+
+  /// Server history has no `downloadFormats` (it isn't persisted), so re-derive
+  /// each assistant message's download format(s) from the user turn that
+  /// produced it — the format the user asked for (named directly, or folded in
+  /// as "Doc format: PDF"). This makes the one-click download buttons show on
+  /// EVERY device / after reload, not only where the turn originally ran.
+  List<Message> _withDerivedDownloads(List<Message> msgs) {
+    final out = <Message>[];
+    for (var i = 0; i < msgs.length; i++) {
+      final m = msgs[i];
+      if (m.role == 'assistant' &&
+          m.content.trim().isNotEmpty &&
+          i > 0 &&
+          msgs[i - 1].role == 'user') {
+        final fmts = _documentIntent(msgs[i - 1].content).formats;
+        out.add(fmts.isEmpty ? m : m.copyWith(downloadFormats: fmts));
+      } else {
+        out.add(m);
+      }
+    }
+    return out;
   }
 
   void startNewChat() {
@@ -261,57 +288,83 @@ class ChatProvider extends ChangeNotifier {
       return;
     }
     // A fresh send from the composer abandons any unanswered clarify panel.
-    _pendingClarify = null;
+    _pendingClarify = [];
     _clarifyOriginal = null;
     _clarifyAttachments = null;
+    _pendingDownloadFormats = null;
     final hasAttachments = attachments != null && attachments.isNotEmpty;
     final text = content.trim();
-    // Only clarify plain-text turns — attachments usually resolve ambiguity.
+
+    // Explicitly-named download format(s) → remember them so the finished answer
+    // offers a one-click download (no need to ask which format).
+    final intent = _documentIntent(content);
+    _pendingDownloadFormats = intent.formats.isEmpty ? null : intent.formats;
+
+    // Clarifier pre-flight (text turns): a request can be underspecified in
+    // several ways, so this may return MORE THAN ONE question (e.g. language +
+    // which spaces + output format). Attachments usually resolve ambiguity, so
+    // the clarifier is skipped there — but a download-without-a-format still asks.
     if (text.isNotEmpty && !hasAttachments) {
       _clarifyChecking = true;
       notifyListeners();
       final modelArg = _selectedModel == 'auto' ? null : _selectedModel;
-      final q = await ApiService.clarify(
+      final questions = await ApiService.clarify(
         message: content,
         history: _messages.where((m) => !m.isStreaming).toList(),
         model: modelArg,
       );
       _clarifyChecking = false;
-      if (q != null) {
-        _pendingClarify = q;
+      if (questions.isNotEmpty) {
+        _pendingClarify = questions;
         _clarifyOriginal = content;
         _clarifyAttachments = attachments;
         notifyListeners();
         return;
       }
       notifyListeners();
+    } else if (intent.ambiguous) {
+      _pendingClarify = [_formatClarifyQuestion()];
+      _clarifyOriginal = content;
+      _clarifyAttachments = attachments;
+      notifyListeners();
+      return;
     }
     await sendMessage(content, attachments: attachments);
   }
 
-  /// Answer the docked clarify panel: fold the choice into the message and run
-  /// the turn directly (skip_clarify — no second question, no loop).
-  Future<void> submitClarification(String answer) async {
-    final q = _pendingClarify;
+  /// Answer the docked clarify panel. [answers] holds one reply per pending
+  /// question (blank = unanswered). Each non-empty answer is folded into the
+  /// message as "Header: answer"; a "format" question also selects the download
+  /// format(s). Then the turn runs.
+  Future<void> submitClarifications(List<String> answers) async {
+    final qs = _pendingClarify;
     final orig = _clarifyOriginal ?? '';
     final atts = _clarifyAttachments;
-    _pendingClarify = null;
+    _pendingClarify = [];
     _clarifyOriginal = null;
     _clarifyAttachments = null;
     notifyListeners();
-    if (answer.trim().isEmpty) {
-      await sendMessage(orig, attachments: atts);
-      return;
+
+    final tags = <String>[];
+    for (var i = 0; i < qs.length; i++) {
+      final a = (i < answers.length ? answers[i] : '').trim();
+      if (a.isEmpty) continue;
+      tags.add('${qs[i].header}: $a');
+      // A format question drives the one-click download(s) on the answer.
+      if (qs[i].header.toLowerCase().contains('format')) {
+        _pendingDownloadFormats = _formatsFromAnswer(a);
+      }
     }
-    final tag = q != null ? '${q.header}: $answer' : answer;
-    await sendMessage('$orig\n\n$tag', attachments: atts);
+    final composed = tags.isEmpty ? orig : '$orig\n\n${tags.join('\n')}';
+    await sendMessage(composed, attachments: atts);
   }
 
-  /// Dismiss the panel and answer the original message anyway.
+  /// Dismiss the panel and answer the original message anyway (the answer still
+  /// has the Export menu / any explicitly-named download buttons).
   Future<void> dismissClarification() async {
     final orig = _clarifyOriginal ?? '';
     final atts = _clarifyAttachments;
-    _pendingClarify = null;
+    _pendingClarify = [];
     _clarifyOriginal = null;
     _clarifyAttachments = null;
     notifyListeners();
@@ -322,10 +375,83 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void _clearClarify() {
-    _pendingClarify = null;
+    _pendingClarify = [];
     _clarifyOriginal = null;
     _clarifyAttachments = null;
     _clarifyChecking = false;
+  }
+
+  // ── Downloadable-document intent (A.4) ────────────────────────────────────
+  /// Read the user's request for a downloadable-document intent: which export
+  /// format(s) they named, and whether they clearly want a download but named
+  /// none (→ ambiguous, ask which).
+  ({bool wants, List<String> formats, bool ambiguous}) _documentIntent(
+      String message) {
+    final t = message.toLowerCase();
+    // Format → keyword pattern. Order sets the button order on the answer.
+    const patterns = <String, String>{
+      'word': r'\.docx|\bdocx\b|word document|word format|word file|ms ?word|'
+          r'microsoft word|\bin word\b|\bas word\b',
+      'pdf': r'\.pdf|\bpdf\b',
+      'excel': r'\.xlsx|\bxlsx\b|\bexcel\b|spreadsheet',
+      'csv': r'\.csv|\bcsv\b',
+      'powerpoint': r'\.pptx|\bpptx\b|power ?point|slide deck|\bslides\b',
+      'markdown': r'\.md\b|markdown',
+      'text': r'\.txt|text file|plain text',
+      'zip': r'\.zip|zip file|zip archive|\bzip\b',
+    };
+    final formats = <String>[
+      for (final e in patterns.entries)
+        if (RegExp(e.value).hasMatch(t)) e.key,
+    ];
+
+    // A clear "make me a file to download" intent, even without a named format.
+    final downloadIntent = RegExp(
+            r'download|downloadable|\bexport\b|save (it|this|them) as|'
+            r'as a (file|document)|in .{0,12}format')
+        .hasMatch(t);
+    final wants = formats.isNotEmpty || downloadIntent;
+    return (wants: wants, formats: formats, ambiguous: downloadIntent && formats.isEmpty);
+  }
+
+  ClarifyQuestion _formatClarifyQuestion() => ClarifyQuestion(
+        header: 'Download format',
+        question: 'Which format would you like to download?',
+        multiSelect: true,
+        options: [
+          ClarifyOption(label: 'Word (.docx)', description: 'Editable document'),
+          ClarifyOption(label: 'PDF', description: 'Portable, print-ready'),
+          ClarifyOption(label: 'Excel (.xlsx)', description: 'Tables / spreadsheet'),
+          ClarifyOption(label: 'PowerPoint', description: 'Slide deck'),
+          ClarifyOption(label: 'Markdown', description: 'Plain .md'),
+          ClarifyOption(label: 'Text', description: 'Plain .txt'),
+        ],
+      );
+
+  /// Map a format-chooser answer (comma-joined labels, or a free-typed reply)
+  /// to export format keys. Defaults to Word + PDF if nothing recognizable.
+  List<String> _formatsFromAnswer(String answer) {
+    final t = answer.toLowerCase();
+    final formats = <String>[];
+    void add(String f) {
+      if (!formats.contains(f)) {
+        formats.add(f);
+      }
+    }
+
+    if (t.contains('word') || t.contains('docx')) add('word');
+    if (t.contains('pdf')) add('pdf');
+    if (t.contains('excel') || t.contains('xlsx')) add('excel');
+    if (t.contains('power') || t.contains('pptx')) add('powerpoint');
+    if (t.contains('markdown') || t.contains('.md')) add('markdown');
+    if (t.contains('text') || t.contains('txt')) add('text');
+    if (t.contains('csv')) add('csv');
+    if (t.contains('zip')) add('zip');
+    if (formats.isEmpty) {
+      add('word');
+      add('pdf');
+    }
+    return formats;
   }
 
   Future<void> sendMessage(String content, {List<ChatAttachment>? attachments}) async {
@@ -391,6 +517,16 @@ class ChatProvider extends ChangeNotifier {
     void handleEvent(Map<String, dynamic> evt) {
       if (evt['model'] != null) model = evt['model'].toString();
       if (evt['platform'] != null) platform = evt['platform'].toString();
+      // Bind to THIS conversation as soon as the backend reveals its id (an
+      // early "conversation"/meta event, and again on "done"). Doing it up front
+      // — not only on success — means a turn that fails mid-stream still binds
+      // the conversation, so a Retry re-runs it in the SAME chat instead of
+      // spawning a duplicate session.
+      final cidAny = evt['conversation_id'] ?? evt['conversationId'];
+      if (cidAny != null && identical(_messages, ownMessages)) {
+        _currentConversationId =
+            cidAny is int ? cidAny : int.tryParse(cidAny.toString());
+      }
       switch (evt['type']) {
         case 'plan_created':
           final subs = (evt['subtasks'] as List?) ?? [];
@@ -432,15 +568,9 @@ class ChatProvider extends ChangeNotifier {
           }
           break;
         case 'done':
-          if (evt['model'] != null) model = evt['model'].toString();
-          if (evt['platform'] != null) platform = evt['platform'].toString();
-          final cid = evt['conversation_id'] ?? evt['conversationId'];
-          // Only adopt the id when THIS turn's conversation is still on screen —
-          // otherwise a background (switched-away) stream would yank the user
-          // back to the old chat.
-          if (cid != null && identical(_messages, ownMessages)) {
-            _currentConversationId = cid is int ? cid : int.tryParse(cid.toString());
-          }
+          // model / platform / conversation id already captured above. The
+          // adoption guard there keeps a background (switched-away) stream from
+          // yanking the user back to the old chat.
           break;
         case 'error':
           throw Exception(evt['message']?.toString() ?? 'Agent error');
@@ -518,6 +648,15 @@ class ChatProvider extends ChangeNotifier {
 
       // Finalize the streamed message.
       updateAssistant(streaming: false);
+      // Offer one-click downloads for the format(s) the user asked for (A.4).
+      if (_pendingDownloadFormats != null &&
+          _pendingDownloadFormats!.isNotEmpty &&
+          buffer.isNotEmpty &&
+          assistantIndex < ownMessages.length &&
+          identical(_messages, ownMessages)) {
+        ownMessages[assistantIndex] = ownMessages[assistantIndex]
+            .copyWith(downloadFormats: _pendingDownloadFormats);
+      }
       _currentModel = model;
       _currentPlatform = platform;
       await loadConversations();
@@ -556,6 +695,7 @@ class ChatProvider extends ChangeNotifier {
       _activeSub = null;
       _turnCompleter = null;
       if (identical(_streamMessagesRef, ownMessages)) _streamMessagesRef = null;
+      _pendingDownloadFormats = null; // consumed by this turn (success or not)
       _isLoading = false;
       notifyListeners();
     }
@@ -582,6 +722,9 @@ class ChatProvider extends ChangeNotifier {
     _messages.removeRange(index, _messages.length);
     notifyListeners();
 
+    // Re-offer downloads if the (edited) request still names a format.
+    final fmts = _documentIntent(text).formats;
+    _pendingDownloadFormats = fmts.isEmpty ? null : fmts;
     await sendMessage(text);
   }
 
@@ -606,6 +749,9 @@ class ChatProvider extends ChangeNotifier {
     }
     _messages.removeRange(userIndex, _messages.length);
     notifyListeners();
+    // Re-offer downloads if the original request named a format.
+    final fmts = _documentIntent(text).formats;
+    _pendingDownloadFormats = fmts.isEmpty ? null : fmts;
     await sendMessage(text, attachments: atts);
   }
 
@@ -689,9 +835,21 @@ class ChatProvider extends ChangeNotifier {
   /// WebSocket path emits, so a single handler covers both.
   Stream<Map<String, dynamic>> _sseAsEvents(Stream<Map<String, dynamic>> sse) async* {
     await for (final chunk in sse) {
+      final cid = chunk['conversationId'] ?? chunk['conversation_id'];
       if (chunk['error'] != null) {
-        yield {'type': 'error', 'message': chunk['error'].toString()};
+        // Carry the conversation id on errors so a failed turn still binds this
+        // chat (Retry then reuses it instead of creating a duplicate).
+        yield {
+          'type': 'error',
+          'message': chunk['error'].toString(),
+          if (cid != null) 'conversation_id': cid,
+        };
         return;
+      }
+      // Early meta chunk (empty content, not done) just carries the id — surface
+      // it so the client binds the conversation before any tokens arrive.
+      if (cid != null && chunk['done'] != true) {
+        yield {'type': 'meta', 'conversation_id': cid};
       }
       final piece = chunk['content']?.toString() ?? '';
       if (piece.isNotEmpty) {
@@ -705,7 +863,7 @@ class ChatProvider extends ChangeNotifier {
       if (chunk['done'] == true) {
         yield {
           'type': 'done',
-          'conversation_id': chunk['conversationId'] ?? chunk['conversation_id'],
+          'conversation_id': cid,
           'model': chunk['model'],
           'platform': chunk['platform'],
         };

@@ -78,10 +78,21 @@ class _ChatScreenState extends State<ChatScreen> {
     final isWide = MediaQuery.of(context).size.width > 768;
 
     return Scaffold(
-      // SafeArea keeps the top bar (menu / model / settings) below the mobile
-      // status bar; no-op on desktop. bottom:false leaves the input's own
-      // bottom padding to handle the nav bar.
-      body: SafeArea(bottom: false, child: Builder(
+      // Android/iOS: the system back gesture/button steps back to the chat from
+      // the in-content views (Profile / Guide / Project), which are view swaps
+      // rather than routes — otherwise back would exit the app.
+      body: PopScope(
+        canPop: _view == _MainView.chat,
+        onPopInvokedWithResult: (didPop, result) {
+          if (!didPop && _view != _MainView.chat) {
+            setState(() => _view = _MainView.chat);
+          }
+        },
+        // Full SafeArea: keeps the top bar below the status bar AND lifts the
+        // composer clear of the bottom system navigation bar (gesture / 3-button)
+        // on mobile. It collapses automatically while the keyboard is open;
+        // no-op on desktop.
+        child: SafeArea(child: Builder(
         builder: (scaffoldContext) => Row(
           children: [
             // Unified conversation sidebar (brand, nav, conversations, bottom
@@ -124,6 +135,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
       )),
+      ),
       // Mobile drawer
       drawer: isWide
           ? null
@@ -264,9 +276,9 @@ class _ChatScreenState extends State<ChatScreen> {
         // Clarifier (A.2): while a blocking question is pending, it REPLACES the
         // composer (it has its own input + Submit) — this frees the space that
         // otherwise overflowed with the keyboard open.
-        if (chatProvider.pendingClarify != null)
+        if (chatProvider.pendingClarify.isNotEmpty)
           ClarifyPanel(
-            question: chatProvider.pendingClarify!,
+            questions: chatProvider.pendingClarify,
             maxHeight: clarifyMax,
           )
         else ...[
@@ -425,18 +437,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
             ),
-          // Settings — on desktop this lives in the left nav rail instead, so
-          // only show the top-bar gear on narrow (mobile) layouts.
-          if (!isWide)
-            IconButton(
-              icon: const Icon(Icons.settings_outlined, size: 20),
-              onPressed: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const SettingsScreen()),
-                );
-              },
-              tooltip: 'Settings',
-            ),
+          // Settings lives only in the side navigation (drawer on mobile, nav
+          // rail on desktop) — no duplicate top-bar gear here.
         ],
       ),
     );

@@ -102,6 +102,13 @@ class _MessageBubbleState extends State<MessageBubble> {
 
   void _setFeedback(int v) {
     setState(() => _feedback = _feedback == v ? 0 : v);
+    // Persist for the memory Reflector (fire-and-forget, fails open).
+    ApiService.submitFeedback(
+      conversationId: context.read<ChatProvider>().currentConversationId,
+      messageIndex: widget.index,
+      rating: _feedback,
+      assistantText: widget.message.content,
+    );
     if (_feedback == 1) {
       showAppMessage(context, 'Thanks for the feedback');
     } else if (_feedback == -1) {
@@ -129,17 +136,44 @@ class _MessageBubbleState extends State<MessageBubble> {
     return 'document';
   }
 
+  /// One-click download of this answer in a specific [fmt] — used by the
+  /// download buttons the assistant shows when the request named a format.
+  Future<void> _downloadFormat(String fmt) async {
+    final content = message.content;
+    if (content.trim().isEmpty) return;
+    if (mounted) {
+      showAppMessage(context, 'Preparing ${_kFormatMeta[fmt]?.$1 ?? fmt}…');
+    }
+    try {
+      // In-response download = just the requested document (clean:true).
+      final res = await ApiService.exportDocument(
+          content: content, format: fmt, title: _exportTitle(), clean: true);
+      if (!mounted) return;
+      await saveExport(context, res.bytes, res.filename);
+    } catch (e) {
+      if (mounted) showAppMessage(context, 'Download failed: $e');
+    }
+  }
+
   Future<void> _export() async {
     final content = message.content;
     if (content.trim().isEmpty) return;
-    // Backend-authoritative triage: which formats apply + the suggested one.
-    List<String> formats = const ['markdown', 'word', 'pdf', 'text'];
+    // Always-available prose/archive formats (user can export ANY answer as
+    // these), plus any content-specific ones the backend suggests (Excel/CSV
+    // for tables, etc.). Backend suggestion order first, base set appended.
+    const base = ['word', 'pdf', 'markdown', 'text', 'zip'];
+    List<String> formats = List.of(base);
     String? suggested;
     try {
       final dec = await ApiService.documentDecision(content);
-      if (dec.formats.isNotEmpty) formats = dec.formats;
+      if (dec.formats.isNotEmpty) {
+        formats = [
+          ...dec.formats,
+          ...base.where((b) => !dec.formats.contains(b)),
+        ];
+      }
       suggested = dec.format;
-    } catch (_) {/* fall back to prose formats */}
+    } catch (_) {/* fall back to the base formats */}
     if (!mounted) return;
 
     final choice = await showModalBottomSheet<String>(
@@ -150,8 +184,10 @@ class _MessageBubbleState extends State<MessageBubble> {
     if (choice == null || !mounted) return;
     showAppMessage(context, 'Preparing ${_kFormatMeta[choice]?.$1 ?? choice}…');
     try {
+      // Export = the WHOLE AI response (clean:false), unlike the in-response
+      // download button which gives only the requested document.
       final res = await ApiService.exportDocument(
-          content: content, format: choice, title: _exportTitle());
+          content: content, format: choice, title: _exportTitle(), clean: false);
       if (!mounted) return;
       await saveExport(context, res.bytes, res.filename);
     } catch (e) {
@@ -710,6 +746,12 @@ class _MessageBubbleState extends State<MessageBubble> {
             _TypingIndicator(stage: _stageFromActivity(message.activity))
           else
             _MessageContent(message: message),
+          // Requested downloads (A.4): one-click buttons for the format(s) the
+          // user asked for — the document is right here, no Export menu needed.
+          if (!message.isStreaming &&
+              message.content.isNotEmpty &&
+              (message.downloadFormats?.isNotEmpty ?? false))
+            _downloadButtons(theme),
           // Footer: response actions (copy / good / bad / share / retry /
           // branch) on the left, the model badge on the right.
           if (message.content.isNotEmpty && !message.isStreaming)
@@ -749,6 +791,85 @@ class _MessageBubbleState extends State<MessageBubble> {
               ),
             ),
         ],
+      ),
+    );
+  }
+
+  /// A "Download" row with one filled chip per requested format. Each generates
+  /// the real file on tap (server-side) and saves/opens it.
+  Widget _downloadButtons(ThemeData theme) {
+    final fmts = message.downloadFormats ?? const <String>[];
+    final primary = theme.colorScheme.primary;
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.download_rounded, size: 14, color: primary),
+            const SizedBox(width: 6),
+            Text('Download',
+                style: theme.textTheme.labelMedium?.copyWith(
+                    color: primary, fontWeight: FontWeight.w700)),
+          ]),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final f in fmts)
+                _DownloadChip(
+                  label: _kFormatMeta[f]?.$1 ?? f,
+                  icon: _kFormatMeta[f]?.$2 ?? Icons.file_download_outlined,
+                  color: primary,
+                  onTap: () => _downloadFormat(f),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A filled, tappable download chip (icon + format label).
+class _DownloadChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _DownloadChip({
+    required this.label,
+    required this.icon,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Material(
+      color: color.withValues(alpha: 0.12),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: color),
+              const SizedBox(width: 8),
+              Text(label,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                      color: color, fontWeight: FontWeight.w600)),
+              const SizedBox(width: 4),
+              Icon(Icons.arrow_downward_rounded, size: 13, color: color),
+            ],
+          ),
+        ),
       ),
     );
   }

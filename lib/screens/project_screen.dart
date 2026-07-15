@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../models/conversation.dart';
 import '../providers/chat_provider.dart';
+import '../services/api_service.dart';
 import '../utils/app_feedback.dart';
 import '../widgets/message_bubble.dart' show kContentMaxWidth;
 
@@ -33,7 +34,64 @@ class ProjectScreen extends StatefulWidget {
 }
 
 class _ProjectScreenState extends State<ProjectScreen> {
-  int _tab = 0; // 0 = Chats, 1 = Sources
+  int _tab = 0; // 0 = Chats, 1 = Sources, 2 = Brain
+
+  // Brain tab state (Part D Phase 4) — lazy-loaded when the tab is first opened.
+  List<Map<String, dynamic>>? _brain;
+  Map<String, dynamic>? _graph;
+  bool _brainLoading = false;
+
+  static const _kindOrder = ['goal', 'decision', 'convention', 'fact'];
+  static const _kindLabel = {
+    'goal': 'Goals',
+    'decision': 'Decisions',
+    'convention': 'Conventions',
+    'fact': 'Facts',
+  };
+  static const _kindIcon = {
+    'goal': Icons.flag_outlined,
+    'decision': Icons.gavel_rounded,
+    'convention': Icons.rule_rounded,
+    'fact': Icons.lightbulb_outline_rounded,
+  };
+
+  void _selectTab(int i) {
+    setState(() => _tab = i);
+    if (i == 2 && _brain == null && !_brainLoading) _loadBrain();
+  }
+
+  Future<void> _loadBrain() async {
+    setState(() => _brainLoading = true);
+    try {
+      final results = await Future.wait([
+        ApiService.getProjectBrain(widget.projectId),
+        ApiService.getProjectGraph(widget.projectId),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _brain = results[0] as List<Map<String, dynamic>>;
+        _graph = results[1] as Map<String, dynamic>;
+        _brainLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _brain = const [];
+        _brainLoading = false;
+      });
+      showAppMessage(context, 'Could not load project brain: $e', isError: true);
+    }
+  }
+
+  Future<void> _deleteBrainEntry(int entryId) async {
+    try {
+      await ApiService.deleteBrainEntry(widget.projectId, entryId);
+      if (!mounted) return;
+      setState(() => _brain?.removeWhere((e) => e['id'] == entryId));
+    } catch (e) {
+      if (mounted) showAppMessage(context, 'Failed: $e', isError: true);
+    }
+  }
 
   static const _months = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -83,7 +141,9 @@ class _ProjectScreenState extends State<ProjectScreen> {
           Expanded(
             child: _tab == 0
                 ? _chatsTab(theme, convs)
-                : _sourcesTab(theme),
+                : _tab == 1
+                    ? _sourcesTab(theme)
+                    : _brainTab(theme),
           ),
         ],
       ),
@@ -171,6 +231,8 @@ class _ProjectScreenState extends State<ProjectScreen> {
             _tabChip(theme, 'Chats', 0, count: chatCount),
             const SizedBox(width: 8),
             _tabChip(theme, 'Sources', 1),
+            const SizedBox(width: 8),
+            _tabChip(theme, 'Brain', 2),
             const Spacer(),
             _newChatButton(theme),
           ]),
@@ -217,7 +279,7 @@ class _ProjectScreenState extends State<ProjectScreen> {
   Widget _tabChip(ThemeData theme, String label, int index, {int? count}) {
     final selected = _tab == index;
     return InkWell(
-      onTap: () => setState(() => _tab = index),
+      onTap: () => _selectTab(index),
       borderRadius: BorderRadius.circular(20),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
@@ -307,6 +369,162 @@ class _ProjectScreenState extends State<ProjectScreen> {
       'Sources',
       'Files added here give every chat in this project shared context. '
           'Project sources are coming soon.',
+    );
+  }
+
+  // ── Brain tab (Part D Phase 4) ─────────────────────────────────────────────
+  Widget _brainTab(ThemeData theme) {
+    if (_brainLoading && _brain == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    final brain = _brain ?? const [];
+    if (brain.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _loadBrain,
+        child: ListView(children: [
+          SizedBox(
+            height: MediaQuery.of(context).size.height * 0.5,
+            child: _emptyState(
+              theme,
+              Icons.psychology_outlined,
+              'No project brain yet',
+              'As you chat inside this project, the assistant distils durable '
+                  'facts, decisions, conventions and goals here — and feeds them '
+                  'into every chat in this project automatically.',
+            ),
+          ),
+        ]),
+      );
+    }
+
+    // Group by kind, ordered goal → decision → convention → fact.
+    final byKind = <String, List<Map<String, dynamic>>>{};
+    for (final e in brain) {
+      byKind.putIfAbsent((e['kind'] as String?) ?? 'fact', () => []).add(e);
+    }
+    final edges = ((_graph?['edges'] as List?) ?? const []).length;
+    final nodes = ((_graph?['nodes'] as List?) ?? const []).length;
+
+    final children = <Widget>[
+      _brainHeader(theme, brain.length, edges, nodes),
+      for (final k in _kindOrder)
+        if (byKind[k] != null) ...[
+          _kindHeader(theme, k, byKind[k]!.length),
+          for (final e in byKind[k]!) _brainEntryRow(theme, e),
+        ],
+      const SizedBox(height: 24),
+    ];
+
+    return RefreshIndicator(
+      onRefresh: _loadBrain,
+      child: ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: children
+            .map((w) => Center(
+                  child: ConstrainedBox(
+                    constraints:
+                        const BoxConstraints(maxWidth: kContentMaxWidth),
+                    child: w,
+                  ),
+                ))
+            .toList(),
+      ),
+    );
+  }
+
+  Widget _brainHeader(ThemeData theme, int entries, int edges, int nodes) {
+    final facts = edges > 0
+        ? '  ·  $edges linked fact${edges == 1 ? '' : 's'} across $nodes entit${nodes == 1 ? 'y' : 'ies'}'
+        : '';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+      child: Row(children: [
+        Icon(Icons.psychology_outlined,
+            size: 18, color: theme.colorScheme.primary),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            '$entries thing${entries == 1 ? '' : 's'} learned$facts',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ),
+        IconButton(
+          onPressed: _brainLoading ? null : _loadBrain,
+          icon: const Icon(Icons.refresh_rounded, size: 18),
+          tooltip: 'Refresh',
+          visualDensity: VisualDensity.compact,
+        ),
+      ]),
+    );
+  }
+
+  Widget _kindHeader(ThemeData theme, String kind, int count) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 6),
+      child: Row(children: [
+        Icon(_kindIcon[kind] ?? Icons.circle_outlined,
+            size: 16, color: theme.colorScheme.primary),
+        const SizedBox(width: 8),
+        Text(
+          _kindLabel[kind] ?? kind,
+          style: theme.textTheme.labelLarge?.copyWith(
+              fontWeight: FontWeight.w700,
+              color: theme.colorScheme.onSurface,
+              letterSpacing: 0.2),
+        ),
+        const SizedBox(width: 6),
+        Text('$count',
+            style: theme.textTheme.labelMedium
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+      ]),
+    );
+  }
+
+  Widget _brainEntryRow(ThemeData theme, Map<String, dynamic> e) {
+    final content = (e['content'] as String?) ?? '';
+    final support = (e['support_count'] as int?) ?? 1;
+    final id = e['id'] as int?;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 12, 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 7, right: 10),
+            child: Icon(Icons.circle,
+                size: 6, color: theme.colorScheme.onSurfaceVariant),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Text(content,
+                  style: theme.textTheme.bodyMedium?.copyWith(height: 1.4)),
+            ),
+          ),
+          if (support > 1)
+            Container(
+              margin: const EdgeInsets.only(left: 8, top: 3),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primary.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text('×$support',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.w700)),
+            ),
+          IconButton(
+            onPressed: id == null ? null : () => _deleteBrainEntry(id),
+            icon: const Icon(Icons.close_rounded, size: 16),
+            tooltip: 'Forget this',
+            visualDensity: VisualDensity.compact,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ],
+      ),
     );
   }
 
