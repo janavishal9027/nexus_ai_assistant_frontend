@@ -2,11 +2,45 @@ import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
 import 'package:provider/provider.dart';
 import '../models/conversation.dart';
+import '../models/project.dart';
 import '../providers/chat_provider.dart';
+import '../utils/app_feedback.dart';
 import '../screens/settings_screen.dart';
 import '../screens/profile_screen.dart';
 import '../screens/guide_screen.dart';
 import 'nav_tile.dart';
+
+/// Responsive dialog content width: full-width-ish on phones, capped on desktop.
+double _dialogWidth(BuildContext context) {
+  final w = MediaQuery.of(context).size.width - 88;
+  if (w < 260) return 260;
+  return w < 400 ? w : 400;
+}
+
+/// A clearly-bordered, filled input with a visible floating label.
+InputDecoration _fieldDecoration(BuildContext context, String label, {String? hint}) {
+  final theme = Theme.of(context);
+  final primary = theme.colorScheme.primary;
+  return InputDecoration(
+    labelText: label,
+    hintText: hint,
+    filled: true,
+    fillColor: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+    labelStyle: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+    floatingLabelStyle: TextStyle(color: primary, fontWeight: FontWeight.w600),
+    hintStyle: TextStyle(color: theme.colorScheme.onSurface.withValues(alpha: 0.4)),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+    enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: BorderSide(color: theme.colorScheme.outline.withValues(alpha: 0.55)),
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: BorderSide(color: primary, width: 1.6),
+    ),
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+  );
+}
 
 /// Unified navigation sidebar (Forui): brand header, quick actions (New chat /
 /// Search), the CONVERSATIONS list (each with a relative time + overflow menu),
@@ -20,6 +54,7 @@ class Sidebar extends StatefulWidget {
   final VoidCallback? onOpenProfile;
   final VoidCallback? onOpenSettings;
   final VoidCallback? onOpenGuide;
+  final void Function(Project project)? onOpenProject;
   final String activeView;
 
   const Sidebar({
@@ -31,6 +66,7 @@ class Sidebar extends StatefulWidget {
     this.onOpenProfile,
     this.onOpenSettings,
     this.onOpenGuide,
+    this.onOpenProject,
     this.activeView = 'chat',
   });
 
@@ -44,6 +80,8 @@ class _SidebarState extends State<Sidebar> {
   String _query = '';
   // Branch parents whose child (branch) chats are currently expanded.
   final Set<int> _expanded = {};
+  // Whole "Projects" section collapsed via its header chevron.
+  bool _projectsOpen = true;
 
   @override
   void initState() {
@@ -338,6 +376,349 @@ class _SidebarState extends State<Sidebar> {
     );
   }
 
+  // ── Projects (A.7) ───────────────────────────────────────────────────────
+  /// Collapsible "Projects" section header (title-case + chevron), per the
+  /// requested design. Tapping it hides/shows the whole project list.
+  Widget _projectsHeader(FTypography typography, FColors colors) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => setState(() => _projectsOpen = !_projectsOpen),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          child: Row(children: [
+            Text('Projects',
+                style: typography.body.sm.copyWith(
+                    fontWeight: FontWeight.w700, color: colors.foreground)),
+            const SizedBox(width: 3),
+            Icon(
+                _projectsOpen
+                    ? Icons.keyboard_arrow_down_rounded
+                    : Icons.keyboard_arrow_right_rounded,
+                size: 17,
+                color: colors.mutedForeground),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _sectionLabel(FTypography typography, FColors colors, String text) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 16, 8),
+      child: Text(text,
+          style: typography.body.xs.copyWith(
+            letterSpacing: 1.0,
+            fontWeight: FontWeight.w700,
+            color: colors.mutedForeground,
+          )),
+    );
+  }
+
+  /// CONVERSATIONS header that doubles as a drop target: dragging a chat that's
+  /// in a project here removes it from the project (un-groups it). The reverse
+  /// of dropping a chat onto a project row.
+  Widget _conversationsHeader(
+      BuildContext context, FTypography typography, FColors colors) {
+    return DragTarget<Conversation>(
+      onWillAcceptWithDetails: (d) => d.data.projectId != null,
+      onAcceptWithDetails: (d) => _assignProject(context, d.data, null),
+      builder: (context, candidate, rejected) {
+        if (candidate.isEmpty) {
+          return _sectionLabel(typography, colors, 'CONVERSATIONS');
+        }
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            color: colors.primary.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: colors.primary.withValues(alpha: 0.6)),
+          ),
+          child: Row(children: [
+            Icon(Icons.outbox_outlined, size: 14, color: colors.primary),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text('Drop to remove from project',
+                  overflow: TextOverflow.ellipsis,
+                  style: typography.body.xs.copyWith(
+                      fontWeight: FontWeight.w700, color: colors.primary)),
+            ),
+          ]),
+        );
+      },
+    );
+  }
+
+  Widget _convTile(BuildContext context, ChatProvider chatProvider,
+      ({Conversation conv, int depth, bool hasChildren}) row,
+      {int extraDepth = 0, bool plainIndent = false}) {
+    final conv = row.conv;
+    final tile = _ConversationTile(
+      conversation: conv,
+      isSelected: conv.id == chatProvider.currentConversationId,
+      subtitle: _relativeTime(conv.updatedAt ?? conv.createdAt),
+      depth: row.depth + extraDepth,
+      plainIndent: plainIndent,
+      hasChildren: row.hasChildren,
+      expanded: _expanded.contains(conv.id),
+      onToggleExpand: row.hasChildren
+          ? () => setState(() {
+                if (!_expanded.remove(conv.id)) _expanded.add(conv.id);
+              })
+          : null,
+      onTap: () {
+        chatProvider.selectConversation(conv.id);
+        widget.onOpenChat?.call();
+        _afterNav();
+      },
+      onRename: () => _renameDialog(conv),
+      onDelete: () => _confirmDelete(conv),
+      projects: chatProvider.projects,
+      onAssignProject: (pid) => _assignProject(context, conv, pid),
+      onMoveToNewProject: () => _moveToNewProject(context, conv),
+    );
+    // Drag a chat onto a project row to file it there (alongside the "Move to
+    // project" menu). Long-press to start so the list still scrolls normally.
+    if (chatProvider.projects.isEmpty) return tile;
+    return LongPressDraggable<Conversation>(
+      data: conv,
+      delay: const Duration(milliseconds: 220),
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      hapticFeedbackOnStart: true,
+      feedback: _dragChip(context, conv),
+      childWhenDragging: Opacity(opacity: 0.4, child: tile),
+      child: tile,
+    );
+  }
+
+  /// The little floating label shown under the pointer while dragging a chat.
+  Widget _dragChip(BuildContext context, Conversation conv) {
+    final colors = context.theme.colors;
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 240),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: colors.primary,
+          borderRadius: BorderRadius.circular(10),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withValues(alpha: 0.35),
+                blurRadius: 10,
+                offset: const Offset(0, 3)),
+          ],
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.drive_file_move_outline,
+              size: 15, color: colors.primaryForeground),
+          const SizedBox(width: 7),
+          Flexible(
+            child: Text(conv.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    color: colors.primaryForeground,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13)),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // A project row followed by its chats nested underneath (like the reference
+  // sidebar). No chevron — the chats are always shown; the row opens the page.
+  List<Widget> _projectBlock(
+      BuildContext context, ChatProvider chatProvider, Project p) {
+    final convs = chatProvider.conversations
+        .where((c) => c.projectId == p.id)
+        .toList()
+      ..sort((a, b) =>
+          (b.updatedAt ?? b.createdAt).compareTo(a.updatedAt ?? a.createdAt));
+    return [
+      _projectRow(context, chatProvider, p),
+      for (final c in convs)
+        _convTile(context, chatProvider,
+            (conv: c, depth: 0, hasChildren: false),
+            extraDepth: 1, plainIndent: true),
+    ];
+  }
+
+  // A project is a single row that opens its page. The row is highlighted while
+  // it holds the currently-open chat, and is a drop target for dragged chats.
+  Widget _projectRow(BuildContext context, ChatProvider chatProvider, Project p) {
+    final isActive = chatProvider.conversations.any(
+        (c) => c.projectId == p.id && c.id == chatProvider.currentConversationId);
+    // Drop target: a chat dragged here is moved into this project.
+    return DragTarget<Conversation>(
+      onWillAcceptWithDetails: (d) => d.data.projectId != p.id,
+      onAcceptWithDetails: (d) => _assignProject(context, d.data, p.id),
+      builder: (context, candidate, rejected) => _ProjectTile(
+        project: p,
+        isActive: isActive,
+        dropHighlight: candidate.isNotEmpty,
+        onOpen: () {
+          widget.onOpenProject?.call(p);
+          _afterNav();
+        },
+        onNewChat: () => _newChatInProject(context, p),
+        onRename: () => _createProjectDialog(context, existing: p),
+        onInstructions: () => _instructionsDialog(context, p),
+        onDelete: () => _confirmDeleteProject(context, p),
+      ),
+    );
+  }
+
+  Future<void> _assignProject(
+      BuildContext context, Conversation conv, int? projectId) async {
+    try {
+      await context.read<ChatProvider>().assignToProject(conv.id, projectId);
+    } catch (e) {
+      if (context.mounted) showAppMessage(context, 'Failed: $e');
+    }
+  }
+
+  /// Start a new chat that will live inside [p]. Opens the (empty) chat; it's
+  /// filed under the project as soon as the first message is sent.
+  void _newChatInProject(BuildContext context, Project p) {
+    context.read<ChatProvider>().startNewChatInProject(p.id);
+    widget.onOpenChat?.call();
+    _afterNav();
+  }
+
+  /// Returns the created/edited project's id (null if cancelled or failed) so
+  /// callers can chain — e.g. create a project and immediately move a chat in.
+  Future<int?> _createProjectDialog(BuildContext context, {Project? existing}) async {
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final descCtrl = TextEditingController(text: existing?.instructions ?? '');
+    final isEdit = existing != null;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isEdit ? 'Rename project' : 'New project'),
+        content: SizedBox(
+          width: _dialogWidth(context),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+                controller: nameCtrl,
+                autofocus: true,
+                textCapitalization: TextCapitalization.words,
+                decoration: _fieldDecoration(context, 'Project name',
+                    hint: 'e.g. Marketing site')),
+            const SizedBox(height: 18),
+            TextField(
+                controller: descCtrl,
+                minLines: 3,
+                maxLines: 5,
+                decoration: _fieldDecoration(
+                    context, 'Project instructions (optional)',
+                    hint: 'Standing instructions applied to every chat here…')),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(isEdit ? 'Save' : 'Create')),
+        ],
+      ),
+    );
+    if (ok != true) return null;
+    final name = nameCtrl.text.trim();
+    if (name.isEmpty) return null;
+    final prov = context.read<ChatProvider>();
+    try {
+      if (isEdit) {
+        await prov.updateProject(existing.id,
+            name: name, instructions: descCtrl.text.trim());
+        return existing.id;
+      } else {
+        final p = await prov.createProject(name, instructions: descCtrl.text.trim());
+        return p.id;
+      }
+    } catch (e) {
+      if (context.mounted) showAppMessage(context, 'Failed: $e');
+      return null;
+    }
+  }
+
+  /// "New project" from a chat's Move-to-project submenu: create it, then move
+  /// this conversation straight into it.
+  Future<void> _moveToNewProject(BuildContext context, Conversation conv) async {
+    final id = await _createProjectDialog(context);
+    if (id != null && context.mounted) {
+      await _assignProject(context, conv, id);
+    }
+  }
+
+  Future<void> _instructionsDialog(BuildContext context, Project p) async {
+    final ctrl = TextEditingController(text: p.instructions ?? '');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${p.name} · instructions'),
+        content: SizedBox(
+          width: _dialogWidth(context),
+          child: TextField(
+              controller: ctrl,
+              autofocus: true,
+              minLines: 5,
+              maxLines: 10,
+              decoration: _fieldDecoration(context, 'Instructions',
+                  hint: 'Standing instructions applied to every chat in this project…'),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await context.read<ChatProvider>()
+          .updateProject(p.id, instructions: ctrl.text.trim());
+    } catch (e) {
+      if (context.mounted) showAppMessage(context, 'Failed: $e');
+    }
+  }
+
+  Future<void> _confirmDeleteProject(BuildContext context, Project p) async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete "${p.name}"?'),
+        content: Text(p.conversationCount > 0
+            ? 'This project has ${p.conversationCount} chat(s). Keep them '
+                '(move to ungrouped) or delete them too?'
+            : 'Delete this project?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          if (p.conversationCount > 0)
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, 'keep'),
+                child: const Text('Keep chats')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red.shade600),
+            onPressed: () =>
+                Navigator.pop(ctx, p.conversationCount > 0 ? 'delete' : 'keep'),
+            child: Text(p.conversationCount > 0 ? 'Delete chats too' : 'Delete'),
+          ),
+        ],
+      ),
+    );
+    if (choice == null) return;
+    try {
+      await context.read<ChatProvider>()
+          .deleteProject(p.id, deleteConversations: choice == 'delete');
+    } catch (e) {
+      if (context.mounted) showAppMessage(context, 'Failed: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.theme.colors;
@@ -349,10 +730,14 @@ class _SidebarState extends State<Sidebar> {
         : chatProvider.conversations
             .where((c) => c.title.toLowerCase().contains(_query.toLowerCase()))
             .toList();
-    // Browsing → nest branch chats under their parent (expandable); searching →
-    // a flat list of matches.
+    final projects = chatProvider.projects;
+    // Browsing → grouped chats live under their project; only ungrouped chats
+    // show in the flat CONVERSATIONS list (branch chats nest under parents).
+    // Searching → a flat list of matches across everything.
+    final ungrouped =
+        _query.isEmpty ? base.where((c) => c.projectId == null).toList() : base;
     final rows = _query.isEmpty
-        ? _treeRows(base)
+        ? _treeRows(ungrouped)
         : [for (final c in base) (conv: c, depth: 0, hasChildren: false)];
 
     return Container(
@@ -364,6 +749,10 @@ class _SidebarState extends State<Sidebar> {
           _brandHeader(colors, typography),
           const SizedBox(height: 4),
           // Quick actions
+          _navItem(colors, typography,
+              icon: Icons.create_new_folder_outlined,
+              label: 'New project',
+              onTap: () => _createProjectDialog(context)),
           _navItem(colors, typography,
               icon: Icons.add_rounded,
               label: 'New chat',
@@ -386,61 +775,37 @@ class _SidebarState extends State<Sidebar> {
                 hint: 'Search chats…',
               ),
             ),
-          const SizedBox(height: 14),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 16, 8),
-            child: Text(
-              'CONVERSATIONS',
-              style: typography.body.xs.copyWith(
-                letterSpacing: 1.0,
-                fontWeight: FontWeight.w700,
-                color: colors.mutedForeground,
-              ),
-            ),
-          ),
+          const SizedBox(height: 10),
           Expanded(
-            child: rows.isEmpty
-                ? Center(
-                    child: Text(
-                      _query.isEmpty
-                          ? 'No conversations yet'
-                          : 'No matching chats',
-                      style: typography.body.sm
-                          .copyWith(color: colors.mutedForeground),
+            child: ListView(
+              padding: const EdgeInsets.only(bottom: 2),
+              children: [
+                // Projects (A.7): grouped chats live here, not in the flat list.
+                if (_query.isEmpty && projects.isNotEmpty) ...[
+                  _projectsHeader(typography, colors),
+                  if (_projectsOpen)
+                    for (final p in projects)
+                      ..._projectBlock(context, chatProvider, p),
+                  const SizedBox(height: 12),
+                ],
+                _conversationsHeader(context, typography, colors),
+                if (rows.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 20),
+                    child: Center(
+                      child: Text(
+                        _query.isEmpty
+                            ? 'No conversations yet'
+                            : 'No matching chats',
+                        style: typography.body.sm
+                            .copyWith(color: colors.mutedForeground),
+                      ),
                     ),
                   )
-                : ListView.builder(
-                    padding: const EdgeInsets.only(bottom: 2),
-                    itemCount: rows.length,
-                    itemBuilder: (context, index) {
-                      final row = rows[index];
-                      final conv = row.conv;
-                      final isSelected =
-                          conv.id == chatProvider.currentConversationId;
-                      return _ConversationTile(
-                        conversation: conv,
-                        isSelected: isSelected,
-                        subtitle: _relativeTime(conv.updatedAt ?? conv.createdAt),
-                        depth: row.depth,
-                        hasChildren: row.hasChildren,
-                        expanded: _expanded.contains(conv.id),
-                        onToggleExpand: row.hasChildren
-                            ? () => setState(() {
-                                  if (!_expanded.remove(conv.id)) {
-                                    _expanded.add(conv.id);
-                                  }
-                                })
-                            : null,
-                        onTap: () {
-                          chatProvider.selectConversation(conv.id);
-                          widget.onOpenChat?.call();
-                          _afterNav();
-                        },
-                        onRename: () => _renameDialog(conv),
-                        onDelete: () => _confirmDelete(conv),
-                      );
-                    },
-                  ),
+                else
+                  for (final row in rows) _convTile(context, chatProvider, row),
+              ],
+            ),
           ),
           Container(
             height: 1,
@@ -525,9 +890,14 @@ class _ConversationTile extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onDelete;
   final int depth;
+  // Project-child chats indent without the branch "subdirectory" arrow glyph.
+  final bool plainIndent;
   final bool hasChildren;
   final bool expanded;
   final VoidCallback? onToggleExpand;
+  final List<Project> projects;
+  final void Function(int? projectId) onAssignProject;
+  final VoidCallback onMoveToNewProject;
 
   const _ConversationTile({
     required this.conversation,
@@ -536,11 +906,114 @@ class _ConversationTile extends StatelessWidget {
     required this.onTap,
     required this.onRename,
     required this.onDelete,
+    required this.onAssignProject,
+    required this.onMoveToNewProject,
     this.depth = 0,
+    this.plainIndent = false,
     this.hasChildren = false,
     this.expanded = false,
     this.onToggleExpand,
+    this.projects = const [],
   });
+
+  /// The "⋯" options menu: Rename, Delete, and a cascading **Move to project**
+  /// submenu whose first entry creates a brand-new project (and moves this chat
+  /// into it). Uses MenuAnchor/SubmenuButton so the submenu cascades on desktop
+  /// and opens inline on mobile — no divider, matching the requested design.
+  Widget _optionsMenu(BuildContext context, FColors colors) {
+    final current = conversation.projectId;
+    final menuStyle = MenuStyle(
+      backgroundColor: const WidgetStatePropertyAll(Color(0xFF1F1F1F)),
+      surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+      shadowColor: WidgetStatePropertyAll(Colors.black.withValues(alpha: 0.45)),
+      elevation: const WidgetStatePropertyAll(8),
+      padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(vertical: 6)),
+      shape: WidgetStatePropertyAll(RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: colors.border),
+      )),
+    );
+    final itemStyle = MenuItemButton.styleFrom(
+      foregroundColor: colors.foreground,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      minimumSize: const Size(184, 42),
+    );
+
+    return MenuAnchor(
+      style: menuStyle,
+      builder: (context, controller, _) => IconButton(
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(),
+        iconSize: 18,
+        tooltip: 'Options',
+        icon: Icon(Icons.more_horiz, color: colors.mutedForeground),
+        onPressed: () =>
+            controller.isOpen ? controller.close() : controller.open(),
+      ),
+      menuChildren: [
+        MenuItemButton(
+          style: itemStyle,
+          leadingIcon:
+              Icon(Icons.edit_outlined, size: 18, color: colors.mutedForeground),
+          onPressed: onRename,
+          child: const Text('Rename'),
+        ),
+        MenuItemButton(
+          style: itemStyle,
+          leadingIcon: Icon(Icons.delete_outline,
+              size: 18, color: colors.mutedForeground),
+          onPressed: onDelete,
+          child: const Text('Delete'),
+        ),
+        SubmenuButton(
+          style: itemStyle,
+          menuStyle: menuStyle,
+          leadingIcon: Icon(Icons.drive_file_move_outline,
+              size: 18, color: colors.mutedForeground),
+          menuChildren: [
+            // Create a new project and move this chat straight into it.
+            MenuItemButton(
+              style: itemStyle,
+              leadingIcon:
+                  Icon(Icons.add_rounded, size: 18, color: colors.primary),
+              onPressed: onMoveToNewProject,
+              child: Text('New project',
+                  style: TextStyle(
+                      color: colors.primary, fontWeight: FontWeight.w600)),
+            ),
+            // Existing projects (the current one is checked + disabled).
+            for (final p in projects)
+              MenuItemButton(
+                style: itemStyle,
+                leadingIcon: Icon(
+                    p.id == current
+                        ? Icons.check_rounded
+                        : Icons.folder_outlined,
+                    size: 18,
+                    color:
+                        p.id == current ? colors.primary : colors.mutedForeground),
+                onPressed:
+                    p.id == current ? null : () => onAssignProject(p.id),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 220),
+                  child: Text(p.name, overflow: TextOverflow.ellipsis),
+                ),
+              ),
+            // Detach from its current project.
+            if (current != null)
+              MenuItemButton(
+                style: itemStyle,
+                leadingIcon: Icon(Icons.folder_off_outlined,
+                    size: 18, color: colors.mutedForeground),
+                onPressed: () => onAssignProject(null),
+                child: const Text('Remove from project'),
+              ),
+          ],
+          child: const Text('Move to project'),
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -554,46 +1027,16 @@ class _ConversationTile extends StatelessWidget {
       trailing: SizedBox(
         width: 26,
         height: 26,
-        child: PopupMenuButton<String>(
-            tooltip: 'Options',
-            padding: EdgeInsets.zero,
-            iconSize: 18,
-            icon: Icon(Icons.more_horiz, color: colors.mutedForeground),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            onSelected: (v) {
-              if (v == 'rename') {
-                onRename();
-              } else if (v == 'delete') {
-                onDelete();
-              }
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(
-                value: 'rename',
-                height: 42,
-                child: Row(children: [
-                  Icon(Icons.edit_outlined, size: 18),
-                  SizedBox(width: 10),
-                  Text('Rename'),
-                ]),
-              ),
-              PopupMenuItem(
-                value: 'delete',
-                height: 42,
-                child: Row(children: [
-                  Icon(Icons.delete_outline, size: 18),
-                  SizedBox(width: 10),
-                  Text('Delete'),
-                ]),
-              ),
-            ],
-          ),
-        ),
-      );
+        child: _optionsMenu(context, colors),
+      ),
+    );
 
     return Padding(
-      padding:
-          EdgeInsets.only(left: 8.0 + depth * 12, right: 8, top: 2, bottom: 2),
+      padding: EdgeInsets.only(
+          left: (plainIndent ? 18.0 : 8.0) + depth * 12,
+          right: 8,
+          top: 2,
+          bottom: 2),
       child: Row(
         children: [
           if (hasChildren)
@@ -608,7 +1051,7 @@ class _ConversationTile extends StatelessWidget {
                     color: colors.mutedForeground),
               ),
             )
-          else if (depth > 0)
+          else if (depth > 0 && !plainIndent)
             Padding(
               padding: const EdgeInsets.only(right: 4, left: 2),
               child: Icon(Icons.subdirectory_arrow_right,
@@ -679,6 +1122,144 @@ class CollapsedSidebar extends StatelessWidget {
         child: Icon(icon,
             size: 20,
             color: color ?? (selected ? colors.primary : colors.mutedForeground)),
+      ),
+    );
+  }
+}
+
+/// A project row (A.7): folder icon + name + a "+" new-chat button and an
+/// overflow menu (Rename / Instructions / Delete). Tapping the row opens the
+/// project page; the project holding the currently-open chat is highlighted.
+/// No inline tree/branch — that's a chat-level feature.
+class _ProjectTile extends StatefulWidget {
+  final Project project;
+  final bool isActive;
+  // A chat is currently being dragged over this project (drop target active).
+  final bool dropHighlight;
+  final VoidCallback onOpen;
+  final VoidCallback onNewChat;
+  final VoidCallback onRename;
+  final VoidCallback onInstructions;
+  final VoidCallback onDelete;
+
+  const _ProjectTile({
+    required this.project,
+    required this.onOpen,
+    required this.onNewChat,
+    required this.onRename,
+    required this.onInstructions,
+    required this.onDelete,
+    this.isActive = false,
+    this.dropHighlight = false,
+  });
+
+  @override
+  State<_ProjectTile> createState() => _ProjectTileState();
+}
+
+class _ProjectTileState extends State<_ProjectTile> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.theme.colors;
+    final typography = context.theme.typography;
+    final p = widget.project;
+    final active = widget.isActive;
+    final drop = widget.dropHighlight;
+    final Color? bg = drop
+        ? colors.primary.withValues(alpha: 0.28)
+        : active
+            ? colors.primary.withValues(alpha: 0.12)
+            : (_hovered ? colors.border.withValues(alpha: 0.55) : null);
+    // Actions are always visible; brighten them on hover / active so they read
+    // clearly against the tinted row background.
+    final iconColor =
+        (_hovered || active) ? colors.foreground : colors.mutedForeground;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: InkWell(
+          onTap: widget.onOpen, // open the project page
+          hoverColor: Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(8),
+              border: drop
+                  ? Border.all(color: colors.primary, width: 1.5)
+                  : null,
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            child: Row(children: [
+              Icon(Icons.folder_outlined, size: 18, color: colors.primary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(p.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: typography.body.sm.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: active ? colors.primary : colors.foreground)),
+              ),
+              // "+" new chat in this project — always visible.
+              _miniButton(iconColor, Icons.add_rounded, 'New chat in project',
+                  widget.onNewChat),
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: PopupMenuButton<String>(
+                  tooltip: 'Project options',
+                  padding: EdgeInsets.zero,
+                  iconSize: 17,
+                  icon: Icon(Icons.more_horiz, color: iconColor),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
+                  onSelected: (v) {
+                    if (v == 'newchat') widget.onNewChat();
+                    if (v == 'rename') widget.onRename();
+                    if (v == 'instructions') widget.onInstructions();
+                    if (v == 'delete') widget.onDelete();
+                  },
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'newchat', height: 42, child: Row(children: [
+                      Icon(Icons.add_rounded, size: 18), SizedBox(width: 10), Text('New chat'),
+                    ])),
+                    PopupMenuItem(value: 'rename', height: 42, child: Row(children: [
+                      Icon(Icons.edit_outlined, size: 18), SizedBox(width: 10), Text('Rename'),
+                    ])),
+                    PopupMenuItem(value: 'instructions', height: 42, child: Row(children: [
+                      Icon(Icons.tune_rounded, size: 18), SizedBox(width: 10), Text('Instructions'),
+                    ])),
+                    PopupMenuItem(value: 'delete', height: 42, child: Row(children: [
+                      Icon(Icons.delete_outline, size: 18), SizedBox(width: 10), Text('Delete'),
+                    ])),
+                  ],
+                ),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _miniButton(
+      Color color, IconData icon, String tooltip, VoidCallback onTap) {
+    return SizedBox(
+      width: 26,
+      height: 26,
+      child: IconButton(
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(),
+        iconSize: 16,
+        tooltip: tooltip,
+        icon: Icon(icon, color: color),
+        onPressed: onTap,
       ),
     );
   }

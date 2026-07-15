@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../models/conversation.dart';
 import '../models/knowledge_base.dart';
 import '../models/chat_attachment.dart';
+import '../models/clarify.dart';
+import '../models/backend_status.dart';
+import '../models/project.dart';
 
 class ApiService {
   static String _baseUrl = 'http://localhost:8080';
@@ -166,6 +170,40 @@ class ApiService {
     throw Exception(_tryJson(r.body)['detail']?.toString() ?? 'Failed (HTTP ${r.statusCode})');
   }
 
+  // ─── Backend status probe (A.6) ───────────────────────────────────────
+  /// Classify the backend's health: online / degraded (reachable, a dependency
+  /// failing) / restarting (proxy 5xx) / unreachable (network/timeout).
+  static Future<({BackendStatus status, String? detail})> probeHealth() async {
+    try {
+      final r = await http
+          .get(Uri.parse('$_baseUrl/api/health'), headers: _headers(json: false))
+          .timeout(const Duration(seconds: 6));
+      if (r.statusCode == 200) {
+        final b = _tryJson(r.body);
+        if ((b['status'] ?? 'healthy') == 'degraded') {
+          final comps = (b['components'] as Map?) ?? const {};
+          final down = comps.entries
+              .where((e) => e.value != 'healthy')
+              .map((e) => e.key)
+              .join(', ');
+          return (
+            status: BackendStatus.degraded,
+            detail: down.isNotEmpty ? '$down unavailable' : 'A dependency is failing',
+          );
+        }
+        return (status: BackendStatus.online, detail: null);
+      }
+      if (r.statusCode == 502 || r.statusCode == 503 || r.statusCode == 504) {
+        return (status: BackendStatus.restarting, detail: 'Server restarting (HTTP ${r.statusCode})');
+      }
+      return (status: BackendStatus.degraded, detail: 'Unexpected response (HTTP ${r.statusCode})');
+    } on TimeoutException {
+      return (status: BackendStatus.unreachable, detail: 'Connection timed out');
+    } catch (_) {
+      return (status: BackendStatus.unreachable, detail: 'Cannot reach the server');
+    }
+  }
+
   // ─── Config (single source of truth) ──────────────────────────────────
   static Future<Map<String, dynamic>> getConfig() async {
     final response = await http.get(Uri.parse('$_baseUrl/api/config'), headers: _headers(json: false));
@@ -204,6 +242,98 @@ class ApiService {
       if (e is Exception) rethrow;
       throw Exception('Chat request failed: ${response.statusCode}');
     }
+  }
+
+  /// Pre-flight clarification gate (chat-module A.2). Returns a blocking
+  /// question if one is needed, else null. Fails open (null) on any error so a
+  /// clarifier hiccup never blocks a chat.
+  static Future<ClarifyQuestion?> clarify({
+    required String message,
+    List<Message>? history,
+    String? model,
+  }) async {
+    try {
+      final r = await http.post(
+        Uri.parse('$_baseUrl/api/chat/clarify'),
+        headers: _headers(),
+        body: jsonEncode({
+          'message': message,
+          if (history != null) 'history': history.map((m) => m.toJson()).toList(),
+          if (model != null) 'model': model,
+        }),
+      );
+      if (r.statusCode == 200) {
+        final b = _tryJson(r.body);
+        if (b['clarify'] == true && b['question'] != null) {
+          return ClarifyQuestion.fromJson(b['question'] as Map<String, dynamic>);
+        }
+      }
+    } catch (_) {/* fail open */}
+    return null;
+  }
+
+  /// Post-turn follow-up suggestions (chat-module A.2 · Suggester). Fails open.
+  static Future<List<String>> suggestFollowups({
+    required int conversationId,
+    String? model,
+  }) async {
+    try {
+      final r = await http.post(
+        Uri.parse('$_baseUrl/api/chat/suggest'),
+        headers: _headers(),
+        body: jsonEncode({
+          'conversation_id': conversationId,
+          if (model != null) 'model': model,
+        }),
+      );
+      if (r.statusCode == 200) {
+        final list = (_tryJson(r.body)['suggestions'] as List?) ?? [];
+        return list.map((e) => e.toString()).where((s) => s.isNotEmpty).toList();
+      }
+    } catch (_) {/* fail open */}
+    return [];
+  }
+
+  /// Backend document triage (A.4): is this content export-worthy and in which
+  /// formats? Fails open (document:false, empty).
+  static Future<({bool document, String? format, List<String> formats})>
+      documentDecision(String content) async {
+    try {
+      final r = await http.post(
+        Uri.parse('$_baseUrl/api/chat/document-decision'),
+        headers: _headers(),
+        body: jsonEncode({'content': content}),
+      );
+      if (r.statusCode == 200) {
+        final b = _tryJson(r.body);
+        return (
+          document: b['document'] == true,
+          format: b['format'] as String?,
+          formats: ((b['formats'] as List?) ?? []).map((e) => e.toString()).toList(),
+        );
+      }
+    } catch (_) {/* fail open */}
+    return (document: false, format: null, formats: const <String>[]);
+  }
+
+  /// Generate a downloadable document (A.4) from answer content. Returns the
+  /// file bytes and the server's suggested filename.
+  static Future<({Uint8List bytes, String filename})> exportDocument({
+    required String content,
+    required String format,
+    String? title,
+  }) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/api/chat/export'),
+      headers: _headers(),
+      body: jsonEncode({'content': content, 'format': format, if (title != null) 'title': title}),
+    );
+    if (r.statusCode == 200) {
+      final fn = r.headers['x-filename'] ?? 'document';
+      return (bytes: r.bodyBytes, filename: fn);
+    }
+    throw Exception(_tryJson(r.body)['detail']?.toString() ??
+        'Export failed (HTTP ${r.statusCode})');
   }
 
   static Stream<Map<String, dynamic>> streamMessage({
@@ -596,5 +726,62 @@ class ApiService {
         headers: _headers(json: false));
     if (r.statusCode == 200) return Conversation.fromJson(jsonDecode(r.body));
     throw Exception('Conversation not found');
+  }
+
+  // ─── Projects (A.7) ────────────────────────────────────────────────────
+  static Future<List<Project>> listProjects() async {
+    final r = await http.get(Uri.parse('$_baseUrl/api/projects'), headers: _headers(json: false));
+    if (r.statusCode == 200) {
+      return (jsonDecode(r.body) as List)
+          .map((e) => Project.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+    return [];
+  }
+
+  static Future<Project> createProject(String name, {String? instructions}) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/api/projects'),
+      headers: _headers(),
+      body: jsonEncode({'name': name, if (instructions != null) 'instructions': instructions}),
+    );
+    if (r.statusCode == 200) return Project.fromJson(jsonDecode(r.body));
+    throw Exception(_tryJson(r.body)['detail']?.toString() ?? 'Failed to create project');
+  }
+
+  static Future<void> updateProject(int id, {String? name, String? instructions}) async {
+    final r = await http.patch(
+      Uri.parse('$_baseUrl/api/projects/$id'),
+      headers: _headers(),
+      body: jsonEncode({
+        if (name != null) 'name': name,
+        if (instructions != null) 'instructions': instructions,
+      }),
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw Exception('Failed to update project (HTTP ${r.statusCode})');
+    }
+  }
+
+  static Future<void> deleteProject(int id, {bool deleteConversations = false}) async {
+    final r = await http.delete(
+      Uri.parse('$_baseUrl/api/projects/$id?delete_conversations=$deleteConversations'),
+      headers: _headers(json: false),
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw Exception('Failed to delete project (HTTP ${r.statusCode})');
+    }
+  }
+
+  /// Group a conversation under a project, or ungroup it ([projectId] null).
+  static Future<void> assignConversationToProject(int conversationId, int? projectId) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/api/conversations/$conversationId/assign'),
+      headers: _headers(),
+      body: jsonEncode({'project_id': projectId}),
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw Exception('Failed to move conversation (HTTP ${r.statusCode})');
+    }
   }
 }

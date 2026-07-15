@@ -4,15 +4,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/chat_input.dart';
+import '../widgets/clarify_panel.dart';
+import '../widgets/backend_status_indicator.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/resize_handle.dart';
+import '../models/project.dart';
 import 'settings_screen.dart';
 import 'profile_screen.dart';
 import 'guide_screen.dart';
+import 'project_screen.dart';
 
 /// Which panel the main content area shows (master-detail with the sidebar).
 /// Settings is a separate full-screen route, so it isn't a view here.
-enum _MainView { chat, profile, guide }
+enum _MainView { chat, profile, guide, project }
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -24,8 +28,10 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _scrollController = ScrollController();
   bool _sidebarOpen = true;
-  // The main content area shows chat, profile, or settings (sidebar persists).
+  // The main content area shows chat, profile, guide, or a project page
+  // (sidebar persists). Settings opens as its own full-screen route.
   _MainView _view = _MainView.chat;
+  Project? _activeProject; // the project shown when _view == project
 
   // Drag-resizable conversation sidebar width (persisted).
   static const double _minSidebar = 220, _maxSidebar = 420;
@@ -90,6 +96,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 onOpenProfile: () => setState(() => _view = _MainView.profile),
                 onOpenSettings: _openSettingsRoute,
                 onOpenGuide: () => setState(() => _view = _MainView.guide),
+                onOpenProject: _openProject,
               ),
               ResizeHandle(
                 onDrag: (dx) => setState(() =>
@@ -129,6 +136,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 onOpenProfile: () => setState(() => _view = _MainView.profile),
                 onOpenSettings: _openSettingsRoute,
                 onOpenGuide: () => setState(() => _view = _MainView.guide),
+                onOpenProject: _openProject,
               )),
             ),
     );
@@ -137,10 +145,16 @@ class _ChatScreenState extends State<ChatScreen> {
   String get _viewName => switch (_view) {
         _MainView.profile => 'profile',
         _MainView.guide => 'guide',
+        _MainView.project => 'project',
         _MainView.chat => 'chat',
       };
 
   void _backToChat() => setState(() => _view = _MainView.chat);
+
+  void _openProject(Project p) => setState(() {
+        _activeProject = p;
+        _view = _MainView.project;
+      });
 
   /// Settings opens as its own full-screen page (its own sub-navigation looks
   /// cramped embedded next to the main sidebar), unlike Profile which is shown
@@ -168,6 +182,19 @@ class _ChatScreenState extends State<ChatScreen> {
         return ProfileScreen(onBack: _backToChat);
       case _MainView.guide:
         return GuideScreen(onBack: _backToChat);
+      case _MainView.project:
+        return ProjectScreen(
+          projectId: _activeProject!.id,
+          onBack: _backToChat,
+          onOpenConversation: (id) {
+            context.read<ChatProvider>().selectConversation(id);
+            setState(() => _view = _MainView.chat);
+          },
+          onNewChat: () {
+            context.read<ChatProvider>().startNewChatInProject(_activeProject!.id);
+            setState(() => _view = _MainView.chat);
+          },
+        );
       case _MainView.chat:
         return _buildChatArea(context, isWide);
     }
@@ -182,7 +209,14 @@ class _ChatScreenState extends State<ChatScreen> {
     final noKeys =
         chatProvider.configLoaded && chatProvider.activeProviders.isEmpty;
 
-    return Column(
+    return LayoutBuilder(builder: (context, constraints) {
+      // Real available height for the chat column — the Scaffold has already
+      // subtracted the keyboard here (unlike MediaQuery inside the body). Cap
+      // the Clarifier panel to half of it so the messages/empty-state region
+      // above always keeps room to shrink into instead of overflowing.
+      final availH = constraints.maxHeight;
+      final clarifyMax = availH.isFinite ? availH * 0.5 : 480.0;
+      return Column(
       children: [
         // Top bar
         _buildTopBar(context, theme, isWide, chatProvider),
@@ -227,22 +261,111 @@ class _ChatScreenState extends State<ChatScreen> {
               ],
             ),
           ),
-        // Input
-        ChatInput(
-          onSend: (text, attachments) {
-            chatProvider.sendMessage(text, attachments: attachments);
-            _scrollToBottom();
-          },
-          isLoading: chatProvider.isLoading,
-          onStop: chatProvider.stopGeneration,
-          deepResearch: chatProvider.deepResearch,
-          onToggleDeepResearch: chatProvider.toggleDeepResearch,
-          webSearch: chatProvider.webSearch,
-          onToggleWebSearch: chatProvider.toggleWebSearch,
-          locked: noKeys,
-          onLockedTap: _openApiKeys,
-        ),
+        // Clarifier (A.2): while a blocking question is pending, it REPLACES the
+        // composer (it has its own input + Submit) — this frees the space that
+        // otherwise overflowed with the keyboard open.
+        if (chatProvider.pendingClarify != null)
+          ClarifyPanel(
+            question: chatProvider.pendingClarify!,
+            maxHeight: clarifyMax,
+          )
+        else ...[
+          if (chatProvider.pendingProjectId != null)
+            _pendingProjectBar(context, chatProvider),
+          if (chatProvider.clarifyChecking) _clarifyCheckingIndicator(context),
+          ChatInput(
+            onSend: (text, attachments) {
+              chatProvider.sendUserMessage(text, attachments: attachments);
+              _scrollToBottom();
+            },
+            isLoading: chatProvider.isBusyHere || chatProvider.clarifyChecking,
+            onStop: chatProvider.stopGeneration,
+            deepResearch: chatProvider.deepResearch,
+            onToggleDeepResearch: chatProvider.toggleDeepResearch,
+            webSearch: chatProvider.webSearch,
+            onToggleWebSearch: chatProvider.toggleWebSearch,
+            locked: noKeys,
+            onLockedTap: _openApiKeys,
+          ),
+        ],
       ],
+      );
+    });
+  }
+
+  /// Slim banner shown above the composer when a new chat is bound to a project
+  /// (started via a project's "New chat"). It's filed there on first send; the
+  /// "×" cancels the binding back to a normal new chat.
+  Widget _pendingProjectBar(BuildContext context, ChatProvider cp) {
+    final theme = Theme.of(context);
+    final primary = theme.colorScheme.primary;
+    var name = 'project';
+    for (final p in cp.projects) {
+      if (p.id == cp.pendingProjectId) {
+        name = p.name;
+        break;
+      }
+    }
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: kContentMaxWidth),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              color: primary.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: primary.withValues(alpha: 0.35)),
+            ),
+            child: Row(children: [
+              Icon(Icons.folder_open_rounded, size: 15, color: primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('New chat in “$name”',
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                        color: primary, fontWeight: FontWeight.w600)),
+              ),
+              InkWell(
+                onTap: cp.startNewChat,
+                borderRadius: BorderRadius.circular(12),
+                child: Padding(
+                  padding: const EdgeInsets.all(2),
+                  child: Icon(Icons.close_rounded,
+                      size: 15, color: primary.withValues(alpha: 0.8)),
+                ),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Slim "understanding your request…" line shown while the Clarifier gate runs.
+  Widget _clarifyCheckingIndicator(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: kContentMaxWidth),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 6, 24, 6),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 13, height: 13,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: theme.colorScheme.primary),
+              ),
+              const SizedBox(width: 10),
+              Text('Understanding your request…',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -270,6 +393,11 @@ class _ChatScreenState extends State<ChatScreen> {
           // Sole flex child: eats all remaining space so the trailing
           // badge + settings sit flush against the top-right corner.
           const Spacer(),
+          // Live backend status (A.6): unreachable / restarting / degraded / online.
+          const Padding(
+            padding: EdgeInsets.only(right: 8),
+            child: BackendStatusIndicator(),
+          ),
           // Provider badge
           if (chatProvider.currentPlatform != null)
             Padding(
@@ -630,7 +758,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildEmptyState(ThemeData theme) {
     return Center(
-      child: Column(
+      // Scrollable so it shrinks gracefully (instead of overflowing) when the
+      // Clarifier panel + keyboard squeeze this Expanded region on mobile.
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
@@ -680,6 +812,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           ),
         ],
+        ),
       ),
     );
   }

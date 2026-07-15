@@ -21,6 +21,9 @@ class ChatInput extends StatefulWidget {
   // guides the user to add one.
   final bool locked;
   final VoidCallback? onLockedTap;
+  // Overrides the default "Message Nexus AI…" placeholder (e.g. the project
+  // page uses "New chat in <project>"). Deep-research / web-search hints still win.
+  final String? hintText;
 
   const ChatInput({
     super.key,
@@ -33,6 +36,7 @@ class ChatInput extends StatefulWidget {
     this.onToggleWebSearch,
     this.locked = false,
     this.onLockedTap,
+    this.hintText,
   });
 
   @override
@@ -460,7 +464,7 @@ class _ChatInputState extends State<ChatInput> {
                             ? 'Ask for an in-depth, well-sourced answer…'
                             : widget.webSearch
                                 ? 'Search the web and answer…'
-                                : 'Message Nexus AI…',
+                                : (widget.hintText ?? 'Message Nexus AI…'),
                         hintStyle: theme.textTheme.bodyMedium?.copyWith(
                           color:
                               theme.colorScheme.onSurface.withValues(alpha: 0.4),

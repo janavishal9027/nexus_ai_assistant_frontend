@@ -13,9 +13,23 @@ import 'package:provider/provider.dart';
 import '../models/conversation.dart';
 import '../models/chat_attachment.dart';
 import '../providers/chat_provider.dart';
+import '../services/api_service.dart';
+import '../services/exporter.dart';
 
 /// Max width of the conversation reading column (messages + input align to it).
 const double kContentMaxWidth = 768;
+
+/// Export formats (A.4): key → (label, icon).
+const Map<String, (String, IconData)> _kFormatMeta = {
+  'markdown': ('Markdown (.md)', Icons.notes_rounded),
+  'word': ('Word (.docx)', Icons.description_outlined),
+  'pdf': ('PDF', Icons.picture_as_pdf_outlined),
+  'excel': ('Excel (.xlsx)', Icons.table_chart_outlined),
+  'csv': ('CSV', Icons.grid_on_rounded),
+  'text': ('Text (.txt)', Icons.text_snippet_outlined),
+  'powerpoint': ('PowerPoint (.pptx)', Icons.slideshow_outlined),
+  'zip': ('Project archive (.zip)', Icons.folder_zip_outlined),
+};
 
 class MessageBubble extends StatefulWidget {
   final Message message;
@@ -104,6 +118,45 @@ class _MessageBubbleState extends State<MessageBubble> {
       return;
     }
     provider.regenerate(idx, modelId: provider.modelIdForName(message.model));
+  }
+
+  // ── Export (A.4) ─────────────────────────────────────────────────────────
+  String _exportTitle() {
+    for (final line in message.content.split('\n')) {
+      final t = line.replaceAll(RegExp(r'^#+\s*'), '').replaceAll('*', '').trim();
+      if (t.isNotEmpty) return t.length > 50 ? t.substring(0, 50) : t;
+    }
+    return 'document';
+  }
+
+  Future<void> _export() async {
+    final content = message.content;
+    if (content.trim().isEmpty) return;
+    // Backend-authoritative triage: which formats apply + the suggested one.
+    List<String> formats = const ['markdown', 'word', 'pdf', 'text'];
+    String? suggested;
+    try {
+      final dec = await ApiService.documentDecision(content);
+      if (dec.formats.isNotEmpty) formats = dec.formats;
+      suggested = dec.format;
+    } catch (_) {/* fall back to prose formats */}
+    if (!mounted) return;
+
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (_) => _ExportSheet(formats: formats, suggested: suggested),
+    );
+    if (choice == null || !mounted) return;
+    showAppMessage(context, 'Preparing ${_kFormatMeta[choice]?.$1 ?? choice}…');
+    try {
+      final res = await ApiService.exportDocument(
+          content: content, format: choice, title: _exportTitle());
+      if (!mounted) return;
+      await saveExport(context, res.bytes, res.filename);
+    } catch (e) {
+      if (mounted) showAppMessage(context, 'Export failed: $e');
+    }
   }
 
   // ── Share (Nexus AI) ─────────────────────────────────────────────────────
@@ -614,6 +667,24 @@ class _MessageBubbleState extends State<MessageBubble> {
     );
   }
 
+  /// Map the agent's live activity to a phase label for the typing indicator
+  /// (chat-module A.2 `stage`). Null → fall back to the rotating word.
+  String? _stageFromActivity(AgentActivity? a) {
+    if (a == null) return null;
+    for (final t in a.tools) {
+      if (t.running) {
+        final n = t.name.toLowerCase();
+        if (n.contains('web') || n.contains('search')) return 'Searching the web';
+        if (n.contains('retriev') || n.contains('rag') || n.contains('ground')) {
+          return 'Retrieving context';
+        }
+        return 'Using ${t.name}';
+      }
+    }
+    if (a.planSteps.isNotEmpty) return 'Planning';
+    return null;
+  }
+
   // ── Assistant message: content + copy + model footer (unchanged) ────────
   Widget _assistantBubble(ThemeData theme) {
     return Container(
@@ -636,7 +707,7 @@ class _MessageBubbleState extends State<MessageBubble> {
             _AgentActivityView(activity: message.activity!),
           // Content
           if (message.isStreaming && message.content.isEmpty)
-            const _TypingIndicator()
+            _TypingIndicator(stage: _stageFromActivity(message.activity))
           else
             _MessageContent(message: message),
           // Footer: response actions (copy / good / bad / share / retry /
@@ -654,6 +725,8 @@ class _MessageBubbleState extends State<MessageBubble> {
                       () => _setFeedback(-1),
                       active: _feedback == -1, activeIcon: Icons.thumb_down),
                   _actionIcon(theme, Icons.ios_share, 'Share', _share),
+                  _actionIcon(
+                      theme, Icons.file_download_outlined, 'Export', _export),
                   _actionIcon(
                       theme, Icons.refresh, 'Retry (same model)', _retry),
                   _branchButton(theme),
@@ -1039,7 +1112,10 @@ class _ToolChip extends StatelessWidget {
 }
 
 class _TypingIndicator extends StatefulWidget {
-  const _TypingIndicator();
+  /// When set (from the agent's live activity), shows a concrete phase label
+  /// (e.g. "Searching the web", "Planning") instead of the rotating word.
+  final String? stage;
+  const _TypingIndicator({this.stage});
 
   @override
   State<_TypingIndicator> createState() => _TypingIndicatorState();
@@ -1085,9 +1161,10 @@ class _TypingIndicatorState extends State<_TypingIndicator>
   }
 
   String get _status {
-    // Keep the playful, ever-changing word rotating the whole time (Claude
-    // style) — even during a long wait. The elapsed seconds shown beside it
-    // already signal when it's taking a while.
+    // A concrete stage (from agent activity) wins; otherwise keep the playful,
+    // ever-changing word rotating the whole time (Claude style).
+    final stage = widget.stage;
+    if (stage != null && stage.isNotEmpty) return '$stage…';
     return '${_words[(_elapsed ~/ 2) % _words.length]}…';
   }
 
@@ -1128,6 +1205,55 @@ class _TypingIndicatorState extends State<_TypingIndicator>
           style: theme.textTheme.bodySmall?.copyWith(color: subtle, fontSize: 12),
         ),
       ],
+    );
+  }
+}
+
+/// Bottom sheet listing the export formats (A.4); the backend-suggested format
+/// is tagged.
+class _ExportSheet extends StatelessWidget {
+  final List<String> formats;
+  final String? suggested;
+  const _ExportSheet({required this.formats, this.suggested});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 6),
+            child: Text('Export as…',
+                style: theme.textTheme.titleMedium
+                    ?.copyWith(fontWeight: FontWeight.bold)),
+          ),
+          for (final f in formats)
+            ListTile(
+              dense: true,
+              leading: Icon(_kFormatMeta[f]?.$2 ?? Icons.insert_drive_file_outlined,
+                  color: theme.colorScheme.primary),
+              title: Text(_kFormatMeta[f]?.$1 ?? f),
+              trailing: f == suggested
+                  ? Container(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primary.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text('Suggested',
+                          style: theme.textTheme.labelSmall
+                              ?.copyWith(color: theme.colorScheme.primary)),
+                    )
+                  : null,
+              onTap: () => Navigator.pop(context, f),
+            ),
+          const SizedBox(height: 8),
+        ],
+      ),
     );
   }
 }

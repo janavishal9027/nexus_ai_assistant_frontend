@@ -140,6 +140,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
       body: isWide ? _wideLayout(theme) : _narrowLayout(theme),
+      // Mobile: a bottom "Add key" FAB on the API Keys section (index 2), so it
+      // never overlaps the header text.
+      floatingActionButton: (!isWide && _section == 2)
+          ? FloatingActionButton(
+              onPressed: _showAddKeyDialog,
+              tooltip: 'Add key',
+              shape: const CircleBorder(),
+              child: const Icon(Icons.add),
+            )
+          : null,
     );
   }
 
@@ -461,11 +471,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
           theme,
           'API Keys',
           'Bring your own provider keys — they stay private to your account',
-          action: FButton(
-            onPress: _showAddKeyDialog,
-            prefix: const Icon(Icons.add, size: 18),
-            child: const Text('Add key'),
-          ),
+          // On wide layouts the button sits in the header; on mobile it moves to
+          // a bottom FAB (avoids overlapping the description text).
+          action: MediaQuery.of(context).size.width >= 720
+              ? FButton(
+                  onPress: _showAddKeyDialog,
+                  prefix: const Icon(Icons.add, size: 18),
+                  child: const Text('Add key'),
+                )
+              : null,
         ),
         if (!_loading && _keys.isNotEmpty) ...[
           FTextField(
@@ -501,6 +515,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           style: theme.textTheme.bodySmall
               ?.copyWith(color: theme.colorScheme.onSurface.withValues(alpha: 0.5)),
         ),
+        // Clearance so the mobile "Add key" FAB never covers the last item.
+        if (MediaQuery.of(context).size.width < 720) const SizedBox(height: 72),
       ],
     );
   }
@@ -904,69 +920,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _platformIcon(String platform) {
-    IconData icon;
-    Color color;
+  (IconData, Color) _platformIconInfo(String platform) {
     switch (platform) {
       case 'openrouter':
-        icon = Icons.router;
-        color = Colors.blue;
-        break;
+        return (Icons.router, Colors.blue);
       case 'groq':
-        icon = Icons.flash_on;
-        color = Colors.orange;
-        break;
+        return (Icons.flash_on, Colors.orange);
       case 'nvidia':
-        icon = Icons.memory;
-        color = Colors.green;
-        break;
+        return (Icons.memory, Colors.green);
       case 'huggingface':
-        icon = Icons.pets;
-        color = Colors.yellow;
-        break;
+        return (Icons.pets, Colors.yellow);
       case 'google':
-        icon = Icons.auto_awesome;
-        color = Colors.lightBlue;
-        break;
+        return (Icons.auto_awesome, Colors.lightBlue);
       case 'mistral':
-        icon = Icons.air;
-        color = const Color(0xFFFF7000);
-        break;
+        return (Icons.air, const Color(0xFFFF7000));
       case 'cerebras':
-        icon = Icons.speed;
-        color = const Color(0xFFEF4444);
-        break;
+        return (Icons.speed, const Color(0xFFEF4444));
       case 'sambanova':
-        icon = Icons.hub;
-        color = const Color(0xFFA855F7);
-        break;
+        return (Icons.hub, const Color(0xFFA855F7));
       case 'vercel':
-        icon = Icons.change_history;
-        color = const Color(0xFF94A3B8);
-        break;
+        return (Icons.change_history, const Color(0xFF94A3B8));
       case 'zai':
-        icon = Icons.hexagon;
-        color = const Color(0xFF6366F1);
-        break;
+        return (Icons.hexagon, const Color(0xFF6366F1));
       case 'tavily':
-        icon = Icons.travel_explore;
-        color = Colors.teal;
-        break;
+        return (Icons.travel_explore, Colors.teal);
       default:
-        icon = Icons.api;
-        color = Colors.grey;
+        return (Icons.api, Colors.grey);
     }
+  }
 
+  Widget _platformAvatar(String platform, {double size = 34}) {
+    final (icon, color) = _platformIconInfo(platform);
     return Container(
-      width: 34,
-      height: 34,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(size * 0.24),
       ),
-      child: Icon(icon, size: 17, color: color),
+      child: Icon(icon, size: size * 0.5, color: color),
     );
   }
+
+  Widget _platformIcon(String platform) => _platformAvatar(platform);
 
   // ─── Dialogs (unchanged behavior) ─────────────────────────────────────
   /// Fixed modal width so dialogs don't grow as you type/paste a long value.
@@ -976,16 +972,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return available < 400 ? available : 400;
   }
 
+  /// A clearly-bordered, filled input with a visible floating label.
+  InputDecoration _fieldDecoration(BuildContext context, String label, {String? hint}) {
+    final theme = Theme.of(context);
+    final primary = theme.colorScheme.primary;
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      filled: true,
+      fillColor: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+      labelStyle: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+      floatingLabelStyle: TextStyle(color: primary, fontWeight: FontWeight.w600),
+      hintStyle: TextStyle(color: theme.colorScheme.onSurface.withValues(alpha: 0.4)),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(color: theme.colorScheme.outline.withValues(alpha: 0.55)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(color: primary, width: 1.6),
+      ),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+    );
+  }
+
   void _showAddKeyDialog() {
     final providers = context.read<ChatProvider>().providers;
     // LLM providers from config, plus non-LLM keys the app supports
     // (Tavily powers the web-search tool — provided here, not in the backend).
     final options = <Map<String, String>>[
       for (final p in providers)
-        {'id': p['id']?.toString() ?? '', 'name': p['name']?.toString() ?? ''},
-      {'id': 'tavily', 'name': 'Tavily (Web Search)'},
+        {
+          'id': p['id']?.toString() ?? '',
+          'name': p['name']?.toString() ?? '',
+          'desc': p['description']?.toString() ?? '',
+        },
+      {
+        'id': 'tavily',
+        'name': 'Tavily (Web Search)',
+        'desc': 'Powers Web Search & Deep Research',
+      },
     ];
-    String selectedPlatform = options.first['id']!;
+    // Providers the user already holds a key for → show an "added" check.
+    final addedPlatforms = _keys
+        .map((k) => (k['platform'] ?? '').toString())
+        .where((s) => s.isNotEmpty)
+        .toSet();
+    String? selectedPlatform;
     final keyController = TextEditingController();
     final labelController = TextEditingController();
 
@@ -1004,31 +1038,84 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 DropdownButtonFormField<String>(
                   value: selectedPlatform,
                   isExpanded: true,
-                  items: options
-                      .map((o) => DropdownMenuItem(
-                            value: o['id'],
-                            child: Text(o['name'] ?? ''),
-                          ))
-                      .toList(),
-                  onChanged: (v) => setDialogState(() => selectedPlatform = v!),
-                  decoration: const InputDecoration(labelText: 'Provider'),
+                  menuMaxHeight: 380,
+                  itemHeight: 56,
+                  borderRadius: BorderRadius.circular(14),
+                  hint: Text('Select provider',
+                      style: TextStyle(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSurface
+                              .withValues(alpha: 0.4))),
+                  // Compact display once picked: just avatar + name.
+                  selectedItemBuilder: (context) => [
+                    for (final o in options)
+                      Row(children: [
+                        _platformAvatar(o['id']!, size: 26),
+                        const SizedBox(width: 10),
+                        Flexible(
+                          child: Text(o['name'] ?? '',
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodyLarge),
+                        ),
+                      ]),
+                  ],
+                  items: [
+                    for (final o in options)
+                      DropdownMenuItem(
+                        value: o['id'],
+                        child: Row(children: [
+                          _platformAvatar(o['id']!, size: 30),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(o['name'] ?? '',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium
+                                        ?.copyWith(fontWeight: FontWeight.w600)),
+                                if ((o['desc'] ?? '').isNotEmpty)
+                                  Text(o['desc']!,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurfaceVariant)),
+                              ],
+                            ),
+                          ),
+                          if (addedPlatforms.contains(o['id'])) ...[
+                            const SizedBox(width: 8),
+                            Icon(Icons.check_circle,
+                                size: 16,
+                                color: Theme.of(context).colorScheme.primary),
+                          ],
+                        ]),
+                      ),
+                  ],
+                  onChanged: (v) => setDialogState(() => selectedPlatform = v),
+                  decoration: _fieldDecoration(context, 'Provider'),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 18),
                 TextField(
                   controller: keyController,
-                  decoration: const InputDecoration(
-                    labelText: 'API Key',
-                    hintText: 'sk-...',
-                  ),
+                  decoration: _fieldDecoration(context, 'API Key', hint: 'sk-…'),
                   obscureText: true,
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 18),
                 TextField(
                   controller: labelController,
-                  decoration: const InputDecoration(
-                    labelText: 'Label (optional)',
-                    hintText: 'My key',
-                  ),
+                  decoration:
+                      _fieldDecoration(context, 'Label (optional)', hint: 'My key'),
                 ),
               ],
             ),
@@ -1042,12 +1129,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onPressed: submitting
                   ? null
                   : () async {
-                      if (keyController.text.trim().isEmpty) return;
+                      if (selectedPlatform == null ||
+                          keyController.text.trim().isEmpty) {
+                        showAppMessage(this.context,
+                            'Pick a provider and paste your key first',
+                            isError: true);
+                        return;
+                      }
                       final navigator = Navigator.of(dialogContext);
                       setDialogState(() => submitting = true);
                       try {
                         final res = await ApiService.addKey(
-                          selectedPlatform,
+                          selectedPlatform!,
                           keyController.text.trim(),
                           label: labelController.text.trim().isNotEmpty
                               ? labelController.text.trim()
@@ -1059,7 +1152,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               (res['models_synced'] as num?)?.toInt() ?? 0;
                           final err = res['sync_error']?.toString();
                           final hasErr = err != null && err.isNotEmpty;
-                          final name = selectedPlatform.toUpperCase();
+                          final name = selectedPlatform!.toUpperCase();
                           showAppMessage(
                             this.context,
                             hasErr

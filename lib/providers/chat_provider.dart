@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/conversation.dart';
 import '../models/chat_attachment.dart';
+import '../models/clarify.dart';
+import '../models/project.dart';
 import '../services/api_service.dart';
 
 class ChatProvider extends ChangeNotifier {
@@ -13,6 +15,15 @@ class ChatProvider extends ChangeNotifier {
   List<Conversation> _conversations = [];
   int? _currentConversationId;
   List<Message> _messages = [];
+
+  // Projects (A.7)
+  List<Project> _projects = [];
+  List<Project> get projects => _projects;
+  // A chat started "in a project": the conversation record doesn't exist until
+  // the first message is sent, so remember the target project and assign the
+  // conversation to it once the backend creates it.
+  int? _pendingProjectId;
+  int? get pendingProjectId => _pendingProjectId;
 
   // UI state
   bool _isLoading = false;
@@ -38,6 +49,20 @@ class ChatProvider extends ChangeNotifier {
   Completer<void>? _turnCompleter;
   bool _stopped = false;
   bool get isGenerating => _isLoading;
+  // The message list the in-flight stream writes to. When it matches the
+  // on-screen list, the current view is the one generating (A.5 · #4).
+  List<Message>? _streamMessagesRef;
+  bool get isBusyHere => _isLoading && identical(_streamMessagesRef, _messages);
+
+  // ── Clarifier (chat-module A.2) ─────────────────────────────────────────
+  // A blocking clarifying question raised before the answer, plus the parked
+  // original inputs so the turn can resume once it's answered.
+  ClarifyQuestion? _pendingClarify;
+  String? _clarifyOriginal;
+  List<ChatAttachment>? _clarifyAttachments;
+  bool _clarifyChecking = false;
+  ClarifyQuestion? get pendingClarify => _pendingClarify;
+  bool get clarifyChecking => _clarifyChecking;
 
   // Getters
   Map<String, dynamic> get config => _config;
@@ -104,15 +129,20 @@ class ChatProvider extends ChangeNotifier {
     try {
       await loadConversations();
     } catch (_) {}
+    try {
+      await loadProjects();
+    } catch (_) {}
   }
 
   /// Clear all per-account state (used on login/logout / account switch).
   void reset() {
     _conversations = [];
+    _projects = [];
     _messages = [];
     _currentConversationId = null;
     _currentModel = null;
     _currentPlatform = null;
+    _pendingProjectId = null;
     _error = null;
     notifyListeners();
   }
@@ -134,6 +164,43 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> loadProjects() async {
+    try {
+      _projects = await ApiService.listProjects();
+      notifyListeners();
+    } catch (_) {/* non-fatal */}
+  }
+
+  Future<Project> createProject(String name, {String? instructions}) async {
+    final p = await ApiService.createProject(name, instructions: instructions);
+    await loadProjects();
+    return p;
+  }
+
+  Future<void> updateProject(int id, {String? name, String? instructions}) async {
+    await ApiService.updateProject(id, name: name, instructions: instructions);
+    await loadProjects();
+  }
+
+  Future<void> deleteProject(int id, {bool deleteConversations = false}) async {
+    await ApiService.deleteProject(id, deleteConversations: deleteConversations);
+    // If the current chat was deleted with the project, reset to a new chat.
+    if (deleteConversations &&
+        _currentConversationId != null &&
+        _conversations.any((c) =>
+            c.id == _currentConversationId && c.projectId == id)) {
+      startNewChat();
+    }
+    await loadProjects();
+    await loadConversations();
+  }
+
+  Future<void> assignToProject(int conversationId, int? projectId) async {
+    await ApiService.assignConversationToProject(conversationId, projectId);
+    await loadProjects();
+    await loadConversations();
+  }
+
   Future<void> loadConversations() async {
     try {
       _conversations = await ApiService.getConversations();
@@ -147,6 +214,7 @@ class ChatProvider extends ChangeNotifier {
   Future<void> selectConversation(int id) async {
     _pendingBranchSource = null;
     _pendingBranchUpTo = null;
+    _clearClarify();
     try {
       _currentConversationId = id;
       final conv = await ApiService.getConversation(id);
@@ -163,11 +231,101 @@ class ChatProvider extends ChangeNotifier {
     _currentConversationId = null;
     _pendingBranchSource = null;
     _pendingBranchUpTo = null;
+    _pendingProjectId = null;
+    _clearClarify();
     _messages = [];
     _currentModel = null;
     _currentPlatform = null;
     _error = null;
     notifyListeners();
+  }
+
+  /// Start a fresh chat that will belong to [projectId]. The conversation is
+  /// created on first send; it's then auto-assigned to the project (see the
+  /// send flow). Until then it's an unsaved draft, like a new branch chat.
+  void startNewChatInProject(int projectId) {
+    startNewChat();
+    _pendingProjectId = projectId;
+    notifyListeners();
+  }
+
+  /// Entry point the composer calls. Runs the Clarifier pre-flight gate: if a
+  /// required detail is missing it raises a blocking question (docked panel);
+  /// otherwise it sends normally. The existing sendMessage flow is untouched.
+  Future<void> sendUserMessage(String content, {List<ChatAttachment>? attachments}) async {
+    if (_clarifyChecking) return;
+    if (_isLoading) {
+      // A stream is still running (possibly for another chat) — one at a time.
+      _error = 'Please wait for the current response to finish.';
+      notifyListeners();
+      return;
+    }
+    // A fresh send from the composer abandons any unanswered clarify panel.
+    _pendingClarify = null;
+    _clarifyOriginal = null;
+    _clarifyAttachments = null;
+    final hasAttachments = attachments != null && attachments.isNotEmpty;
+    final text = content.trim();
+    // Only clarify plain-text turns — attachments usually resolve ambiguity.
+    if (text.isNotEmpty && !hasAttachments) {
+      _clarifyChecking = true;
+      notifyListeners();
+      final modelArg = _selectedModel == 'auto' ? null : _selectedModel;
+      final q = await ApiService.clarify(
+        message: content,
+        history: _messages.where((m) => !m.isStreaming).toList(),
+        model: modelArg,
+      );
+      _clarifyChecking = false;
+      if (q != null) {
+        _pendingClarify = q;
+        _clarifyOriginal = content;
+        _clarifyAttachments = attachments;
+        notifyListeners();
+        return;
+      }
+      notifyListeners();
+    }
+    await sendMessage(content, attachments: attachments);
+  }
+
+  /// Answer the docked clarify panel: fold the choice into the message and run
+  /// the turn directly (skip_clarify — no second question, no loop).
+  Future<void> submitClarification(String answer) async {
+    final q = _pendingClarify;
+    final orig = _clarifyOriginal ?? '';
+    final atts = _clarifyAttachments;
+    _pendingClarify = null;
+    _clarifyOriginal = null;
+    _clarifyAttachments = null;
+    notifyListeners();
+    if (answer.trim().isEmpty) {
+      await sendMessage(orig, attachments: atts);
+      return;
+    }
+    final tag = q != null ? '${q.header}: $answer' : answer;
+    await sendMessage('$orig\n\n$tag', attachments: atts);
+  }
+
+  /// Dismiss the panel and answer the original message anyway.
+  Future<void> dismissClarification() async {
+    final orig = _clarifyOriginal ?? '';
+    final atts = _clarifyAttachments;
+    _pendingClarify = null;
+    _clarifyOriginal = null;
+    _clarifyAttachments = null;
+    notifyListeners();
+    final hasAtts = atts != null && atts.isNotEmpty;
+    if (orig.trim().isNotEmpty || hasAtts) {
+      await sendMessage(orig, attachments: atts);
+    }
+  }
+
+  void _clearClarify() {
+    _pendingClarify = null;
+    _clarifyOriginal = null;
+    _clarifyAttachments = null;
+    _clarifyChecking = false;
   }
 
   Future<void> sendMessage(String content, {List<ChatAttachment>? attachments}) async {
@@ -201,6 +359,12 @@ class ChatProvider extends ChangeNotifier {
     // Placeholder assistant message that we update as events stream in.
     _messages.add(Message(role: 'assistant', content: '', isStreaming: true, activity: activity));
     final assistantIndex = _messages.length - 1;
+    // Capture THIS turn's message list. If the user switches conversations
+    // mid-stream, `_messages` is reassigned but the stream keeps writing here
+    // (parked off-screen) and still persists to the backend — no corruption,
+    // and the `done` event won't yank the current conversation id (A.5 · #4).
+    final ownMessages = _messages;
+    _streamMessagesRef = ownMessages;
     notifyListeners();
 
     final buffer = StringBuffer();
@@ -212,8 +376,8 @@ class ChatProvider extends ChangeNotifier {
 
     // Replace the placeholder with the latest streamed text + activity.
     void updateAssistant({required bool streaming}) {
-      if (assistantIndex >= _messages.length) return;
-      _messages[assistantIndex] = Message(
+      if (assistantIndex >= ownMessages.length) return;
+      ownMessages[assistantIndex] = Message(
         role: 'assistant',
         content: buffer.toString(),
         model: model,
@@ -271,7 +435,10 @@ class ChatProvider extends ChangeNotifier {
           if (evt['model'] != null) model = evt['model'].toString();
           if (evt['platform'] != null) platform = evt['platform'].toString();
           final cid = evt['conversation_id'] ?? evt['conversationId'];
-          if (cid != null) {
+          // Only adopt the id when THIS turn's conversation is still on screen —
+          // otherwise a background (switched-away) stream would yank the user
+          // back to the old chat.
+          if (cid != null && identical(_messages, ownMessages)) {
             _currentConversationId = cid is int ? cid : int.tryParse(cid.toString());
           }
           break;
@@ -354,29 +521,41 @@ class ChatProvider extends ChangeNotifier {
       _currentModel = model;
       _currentPlatform = platform;
       await loadConversations();
+      // A chat started "in a project" — now that its conversation exists, move
+      // it into the target project. Guard on identical(_messages, ownMessages)
+      // so a background (switched-away) turn doesn't grab the pending target.
+      if (_pendingProjectId != null &&
+          _currentConversationId != null &&
+          identical(_messages, ownMessages)) {
+        final pid = _pendingProjectId!;
+        _pendingProjectId = null;
+        await assignToProject(_currentConversationId!, pid);
+      }
     } catch (e) {
       if (_stopped) {
         // User cancelled: keep whatever streamed so far, drop an empty bubble.
         if (buffer.isNotEmpty) {
           updateAssistant(streaming: false);
-        } else if (assistantIndex < _messages.length &&
-            _messages[assistantIndex].role == 'assistant') {
-          _messages.removeAt(assistantIndex);
+        } else if (assistantIndex < ownMessages.length &&
+            ownMessages[assistantIndex].role == 'assistant') {
+          ownMessages.removeAt(assistantIndex);
         }
       } else {
         if (buffer.isEmpty &&
-            assistantIndex < _messages.length &&
-            _messages[assistantIndex].role == 'assistant') {
-          _messages.removeAt(assistantIndex);
+            assistantIndex < ownMessages.length &&
+            ownMessages[assistantIndex].role == 'assistant') {
+          ownMessages.removeAt(assistantIndex);
         } else {
           updateAssistant(streaming: false);
         }
-        _error = _friendlyError(e);
+        // Surface the error only if this turn's conversation is on screen.
+        if (identical(_messages, ownMessages)) _error = _friendlyError(e);
       }
     } finally {
       await _activeSub?.cancel();
       _activeSub = null;
       _turnCompleter = null;
+      if (identical(_streamMessagesRef, ownMessages)) _streamMessagesRef = null;
       _isLoading = false;
       notifyListeners();
     }

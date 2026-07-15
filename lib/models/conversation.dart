@@ -6,6 +6,7 @@ class Conversation {
   final DateTime createdAt;
   final DateTime? updatedAt;
   final int? parentId; // source conversation, if this is a branch
+  final int? projectId; // project this chat is grouped under (A.7), or null
   final List<Message>? messages;
 
   Conversation({
@@ -14,6 +15,7 @@ class Conversation {
     required this.createdAt,
     this.updatedAt,
     this.parentId,
+    this.projectId,
     this.messages,
   });
 
@@ -28,6 +30,7 @@ class Conversation {
           ? DateTime.parse(json['updated_at'])
           : null,
       parentId: json['parent_id'],
+      projectId: json['project_id'],
       messages: json['messages'] != null
           ? (json['messages'] as List).map((m) => Message.fromJson(m)).toList()
           : null,
