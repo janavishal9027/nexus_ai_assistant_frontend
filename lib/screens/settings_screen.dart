@@ -1,11 +1,16 @@
 import 'dart:convert';
+import 'dart:io' show File;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
 import '../providers/auth_provider.dart';
+import '../providers/settings_provider.dart';
 import '../services/api_service.dart';
 import '../services/exporter.dart';
 import '../widgets/resize_handle.dart';
@@ -30,11 +35,23 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   List<Map<String, dynamic>> _keys = [];
   bool _loading = true;
+  int? _testingKeyId;   // key currently being probed against its provider
   int _section = 0;
   String _keyQuery = '';
   // Memory & Privacy section (Part D).
   Map<String, dynamic>? _memory;
   bool _memoryLoading = false;
+  // The user's memory switches; defaults all-on until the summary loads.
+  Map<String, bool> _memPrefs = const {
+    'recall_enabled': true,
+    'record_enabled': true,
+    'reflect_enabled': true,
+    'graph_enabled': true,
+  };
+  // Personal memory graph (Part D Phase 5) — loaded lazily when expanded.
+  List<Map> _memGraphEdges = const [];
+  bool _memGraphLoading = false;
+  bool _memGraphLoaded = false;
 
   // Drag-resizable section-nav width (persisted).
   static const double _minRail = 180, _maxRail = 360;
@@ -50,12 +67,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _profileError;
   static final _emailRe = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
 
+  // NB: these indices are referenced positionally elsewhere — the "Add key" FAB
+  // below and chat_screen.dart's no-keys onboarding both hard-code 2 (API Keys).
+  // Append new sections; don't insert.
   final _nav = <({IconData icon, String label})>[
     (icon: Icons.account_circle_outlined, label: 'Account'),
     (icon: Icons.dns_outlined, label: 'Server'),
     (icon: Icons.key_outlined, label: 'API Keys'),
     (icon: Icons.hub_outlined, label: 'Providers'),
     (icon: Icons.psychology_outlined, label: 'Memory'),
+    (icon: Icons.palette_outlined, label: 'Personalization'),
     (icon: Icons.info_outline, label: 'About'),
   ];
 
@@ -130,6 +151,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await context.read<ChatProvider>().loadConfig(); // refresh active status
     } catch (_) {}
     if (mounted) setState(() => _loading = false);
+  }
+
+  /// Probe a key against its provider now, rather than making the user infer
+  /// its health from a chat that quietly fell back to another provider.
+  Future<void> _testKey(int keyId) async {
+    setState(() => _testingKeyId = keyId);
+    final res = await ApiService.testKey(keyId);
+    if (!mounted) return;
+    setState(() => _testingKeyId = null);
+    await _loadKeys();
+    if (!mounted) return;
+    final ok = res['ok'] == true;
+    final err = (res['error'] ?? '').toString();
+    showAppMessage(
+      context,
+      ok ? 'Key works' : (err.isEmpty ? 'Key check failed' : err),
+      isError: !ok,
+    );
   }
 
   @override
@@ -275,6 +314,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return _providersSection(theme);
       case 4:
         return _memorySection(theme);
+      case 5:
+        return _personalizationSection(theme);
       default:
         return _aboutSection(theme);
     }
@@ -569,12 +610,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  /// Turn a provider's raw error into something a person can act on. The full
+  /// text is still shown as a tooltip.
+  static (String, String) _explainKeyError(String status, String? raw) {
+    final e = (raw ?? '').toLowerCase();
+    if (e.contains('more credits') ||
+        e.contains('402') ||
+        e.contains('insufficient credit') ||
+        e.contains('out of credit')) {
+      return ('Out of credits', 'Top up this provider to use its models.');
+    }
+    if (e.contains('insufficient balance')) {
+      return ('No balance', 'This provider account has no balance left.');
+    }
+    if (e.contains('credit card') || e.contains('customer_verification')) {
+      return ('Card required', 'This provider needs a card on file.');
+    }
+    if (e.contains('reported as leaked')) {
+      return ('Key leaked', 'This key was flagged as public. Replace it.');
+    }
+    if (e.contains('401') ||
+        e.contains('invalid api key') ||
+        e.contains('unauthorized') ||
+        e.contains('authentication')) {
+      return ('Invalid key', 'The provider rejected this key.');
+    }
+    if (e.contains('permission') || e.contains('403')) {
+      return ('No permission', 'This key lacks access to these models.');
+    }
+    if (status == 'limited') {
+      return ('Rate limited', 'Quota reached — it should recover on its own.');
+    }
+    if (status == 'healthy') return ('Healthy', 'Last call succeeded.');
+    if (status == 'unknown') return ('Untested', 'Not used yet — hit Test.');
+    return ('Error', raw ?? 'Unknown problem.');
+  }
+
   Widget _keyTile(ThemeData theme, Map<String, dynamic> key) {
     final platform = (key['platform'] ?? '').toString();
     final maskedKey = (key['maskedKey'] ?? '****').toString();
     final label = (key['label'] ?? '').toString();
     final enabled = key['enabled'] == true;
-    final statusColor = enabled ? Colors.green : Colors.red;
+    final status = (key['status'] ?? 'unknown').toString();
+    final rawError = key['lastError'] as String?;
+    final (badge, detail) = _explainKeyError(status, rawError);
+    // Health, not just on/off: a key can be enabled and still be out of credits,
+    // which is exactly the case the old "Active" badge hid.
+    final Color statusColor = !enabled
+        ? theme.colorScheme.onSurface.withValues(alpha: 0.4)
+        : switch (status) {
+            'healthy' => const Color(0xFF10A37F),
+            'limited' => Colors.orange,
+            'error' => Colors.red,
+            _ => theme.colorScheme.onSurface.withValues(alpha: 0.5),
+          };
+    final testing = _testingKeyId == key['id'];
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -603,17 +693,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
                         fontFamily: 'monospace',
                         fontSize: 11)),
+                // Why it's unhealthy — the whole point of the exercise.
+                if (enabled && (status == 'error' || status == 'limited'))
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(detail,
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: statusColor, fontSize: 11)),
+                  ),
               ],
             ),
           ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: statusColor.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(6),
+          Tooltip(
+            message: rawError ?? detail,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: statusColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(enabled ? badge : 'Disabled',
+                  style: TextStyle(fontSize: 10, color: statusColor, fontWeight: FontWeight.w600)),
             ),
-            child: Text(enabled ? 'Active' : 'Disabled',
-                style: TextStyle(fontSize: 10, color: statusColor, fontWeight: FontWeight.w600)),
+          ),
+          IconButton(
+            icon: testing
+                ? const SizedBox(
+                    width: 14, height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.wifi_tethering, size: 18),
+            tooltip: 'Test this key',
+            onPressed: testing ? null : () => _testKey(key['id']),
           ),
           IconButton(
             icon: const Icon(Icons.delete_outline, size: 18),
@@ -732,8 +842,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     final counts = (_memory?['counts'] as Map?) ?? const {};
     final skills = ((_memory?['skills'] as List?) ?? const []).cast<Map>();
-    return ListView(
-      padding: const EdgeInsets.all(20),
+    final graphCount = (counts['graph'] as int?) ?? 0;
+    // A Column, NOT a ListView: both layouts already wrap _sectionBody in a
+    // SingleChildScrollView, and a vertical viewport inside one gets unbounded
+    // height and renders nothing. Every other section returns a Column too.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _header(theme, 'Memory & Privacy', 'What Nexus AI remembers about you'),
         const SizedBox(height: 10),
@@ -743,13 +857,87 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _memStat(theme, '${counts['episodic'] ?? 0}', 'memories'),
           _memStat(theme, '${counts['skills'] ?? 0}', 'skills'),
           _memStat(theme, '${counts['feedback'] ?? 0}', 'feedback'),
+          _memStat(theme, '$graphCount', 'connections'),
+          _memStat(theme, '${counts['knowledge'] ?? 0}', 'facts'),
         ]),
         const SizedBox(height: 18),
+
+        // ── Controls: the user's actual privacy levers ─────────────────────
+        _sectionLabel(theme, 'What Nexus AI may do'),
+        _memSwitch(
+          theme,
+          key: 'record_enabled',
+          title: 'Remember my chats',
+          subtitle: 'Save exchanges so they can be recalled in later chats. '
+              'Off means nothing new is learned or stored.',
+        ),
+        _memSwitch(
+          theme,
+          key: 'recall_enabled',
+          title: 'Use memory in replies',
+          subtitle: 'Bring what it knows about you into the prompt. Off means '
+              'each chat starts fresh — what is stored is kept, just not used.',
+        ),
+        _memSwitch(
+          theme,
+          key: 'reflect_enabled',
+          title: 'Learn skills about me',
+          subtitle: 'Distil your chats and 👍/👎 into durable preferences.',
+          // Reflection reads the stored log, so it can't run without recording.
+          dependsOn: 'record_enabled',
+        ),
+        _memSwitch(
+          theme,
+          key: 'graph_enabled',
+          title: 'Build my personal graph',
+          subtitle: 'Track the people, orgs and tools you mention, and how they '
+              'connect.',
+          dependsOn: 'record_enabled',
+        ),
+        const SizedBox(height: 18),
+
         if (skills.isNotEmpty) ...[
           _sectionLabel(theme, 'What I know about you'),
           ...skills.take(12).map((s) => _skillTile(theme, s)),
           const SizedBox(height: 18),
         ],
+
+        // ── Personal memory graph (Part D Phase 5) ─────────────────────────
+        if (graphCount > 0) ...[
+          _sectionLabel(theme, 'People, orgs & tools'),
+          Theme(
+            data: theme.copyWith(dividerColor: Colors.transparent),
+            child: ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              childrenPadding: const EdgeInsets.only(bottom: 8),
+              title: Text('$graphCount connection${graphCount == 1 ? '' : 's'}',
+                  style: theme.textTheme.bodyMedium),
+              subtitle: Text('How the people, orgs and tools you mention relate',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurface.withValues(alpha: 0.6))),
+              onExpansionChanged: (open) {
+                if (open && !_memGraphLoaded) _loadMemoryGraph();
+              },
+              children: [
+                if (_memGraphLoading)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: LinearProgressIndicator(minHeight: 2),
+                  )
+                else if (_memGraphEdges.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Text('Nothing to show yet.',
+                        style: theme.textTheme.bodySmall),
+                  )
+                else
+                  ..._memGraphEdges.take(50).map((e) => _memEdgeTile(theme, e)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 18),
+        ],
+
         Row(children: [
           Expanded(
             child: OutlinedButton.icon(
@@ -772,13 +960,96 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const SizedBox(height: 12),
         Text(
           'Nexus AI keeps durable, per-account memory to personalize help — recent '
-          'exchanges plus skills it distils about you. Recall is scoped to your '
-          'account; you can export or clear it anytime.',
+          'exchanges, skills it distils about you, and the people/orgs/tools you '
+          'mention. Recall is scoped to your account; you can turn any of it off, '
+          'or export or clear it anytime. Raw exchanges are dropped after a year; '
+          'what you clear is gone immediately.',
           style: theme.textTheme.bodySmall
               ?.copyWith(color: theme.colorScheme.onSurface.withValues(alpha: 0.6)),
         ),
       ],
     );
+  }
+
+  /// One memory switch. [dependsOn] greys the row out when its parent switch is
+  /// off, so the UI can't imply a layer runs when its input isn't being written.
+  Widget _memSwitch(ThemeData theme, {
+    required String key,
+    required String title,
+    required String subtitle,
+    String? dependsOn,
+  }) {
+    final blocked = dependsOn != null && !(_memPrefs[dependsOn] ?? true);
+    final on = (_memPrefs[key] ?? true) && !blocked;
+    return Opacity(
+      opacity: blocked ? 0.5 : 1,
+      child: SwitchListTile.adaptive(
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        value: on,
+        onChanged: blocked ? null : (v) => _setMemPref(key, v),
+        title: Text(title, style: theme.textTheme.bodyMedium),
+        subtitle: Text(subtitle, style: theme.textTheme.bodySmall
+            ?.copyWith(color: theme.colorScheme.onSurface.withValues(alpha: 0.6))),
+      ),
+    );
+  }
+
+  Widget _memEdgeTile(ThemeData theme, Map e) {
+    // /api/memory/graph emits `support` (the export uses `support_count`).
+    final support = (e['support'] as int?) ?? 1;
+    final id = e['id'] as int?;
+    final muted = theme.colorScheme.onSurface.withValues(alpha: 0.6);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Row(children: [
+        Expanded(
+          child: Text.rich(TextSpan(children: [
+            TextSpan(text: (e['source'] ?? '').toString(),
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(fontWeight: FontWeight.w600)),
+            TextSpan(text: '  ${(e['relation'] ?? '').toString()}  ',
+                style: theme.textTheme.bodySmall?.copyWith(color: muted)),
+            TextSpan(text: (e['target'] ?? '').toString(),
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(fontWeight: FontWeight.w600)),
+          ])),
+        ),
+        if (support > 1)
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: Text('×$support',
+                style: theme.textTheme.labelSmall?.copyWith(color: muted)),
+          ),
+        // Forget just this fact — the graph can be wrong about you, and the
+        // alternative shouldn't be wiping all of it.
+        if (id != null)
+          IconButton(
+            icon: const Icon(Icons.close, size: 15),
+            color: muted,
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            padding: EdgeInsets.zero,
+            tooltip: 'Forget this',
+            onPressed: () => _forgetEdge(id),
+          ),
+      ]),
+    );
+  }
+
+  Future<void> _forgetEdge(int edgeId) async {
+    final previous = _memGraphEdges;
+    // Optimistic: drop it now, restore if the server disagrees.
+    setState(() => _memGraphEdges =
+        _memGraphEdges.where((e) => e['id'] != edgeId).toList());
+    final ok = await ApiService.deleteMemoryEdge(edgeId);
+    if (!mounted) return;
+    if (!ok) {
+      setState(() => _memGraphEdges = previous);
+      showAppMessage(context, 'Could not forget that', isError: true);
+      return;
+    }
+    _loadMemory();   // refresh the connections count
   }
 
   Widget _memStat(ThemeData theme, String value, String label) {
@@ -826,7 +1097,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _loadMemory() async {
     setState(() => _memoryLoading = true);
     final m = await ApiService.getMemorySummary();
-    if (mounted) setState(() { _memory = m; _memoryLoading = false; });
+    if (!mounted) return;
+    setState(() {
+      _memory = m;
+      _memoryLoading = false;
+      final p = m['prefs'];
+      if (p is Map) {
+        _memPrefs = p.map((k, v) => MapEntry(k.toString(), v == true));
+      }
+    });
+  }
+
+  Future<void> _loadMemoryGraph() async {
+    setState(() => _memGraphLoading = true);
+    final g = await ApiService.getMemoryGraph();
+    if (!mounted) return;
+    setState(() {
+      _memGraphEdges = ((g['edges'] as List?) ?? const []).cast<Map>();
+      _memGraphLoading = false;
+      _memGraphLoaded = true;
+    });
+  }
+
+  /// Flip a memory switch optimistically, reverting if the save fails — a
+  /// switch that silently lies about a privacy setting is worse than an error.
+  Future<void> _setMemPref(String key, bool value) async {
+    final previous = Map<String, bool>.from(_memPrefs);
+    setState(() => _memPrefs = {..._memPrefs, key: value});
+    final saved = await ApiService.setMemoryPrefs({key: value});
+    if (!mounted) return;
+    if (saved == null) {
+      setState(() => _memPrefs = previous);
+      showAppMessage(context, 'Could not save that setting', isError: true);
+      return;
+    }
+    setState(() => _memPrefs = saved);
   }
 
   Future<void> _exportMemory() async {
@@ -841,32 +1146,287 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await saveExport(context, bytes, 'nexus-memory.json');
   }
 
+  /// What each purge scope actually deletes. Kept in step with the backend's
+  /// data_lifecycle.SCOPES — the copy must name every layer a scope removes.
+  static const List<({String scope, String label, String detail})> _memScopes = [
+    (
+      scope: 'all',
+      label: 'Everything',
+      detail: 'Memories, skills, feedback, your personal graph, and the facts '
+          'learned from your chats and projects.',
+    ),
+    (
+      scope: 'episodic',
+      label: 'Memories only',
+      detail: 'The stored record of past exchanges. Skills already distilled '
+          'from them are kept.',
+    ),
+    (
+      scope: 'skills',
+      label: 'Skills only',
+      detail: 'The preferences and lessons learned about you.',
+    ),
+    (
+      scope: 'feedback',
+      label: 'Feedback only',
+      detail: 'Your 👍/👎 ratings on replies.',
+    ),
+    (
+      scope: 'graph',
+      label: 'Personal graph only',
+      detail: 'The people, orgs and tools you mention, and how they connect.',
+    ),
+    (
+      scope: 'knowledge',
+      label: 'Learned facts only',
+      detail: 'Facts pulled from the content of your chats and projects.',
+    ),
+  ];
+
   Future<void> _clearMemory() async {
+    var selected = 'all';
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Clear all memory?'),
-        content: const Text(
-            'This permanently deletes everything Nexus AI has learned about you '
-            '— memories, skills, and feedback. This cannot be undone.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Clear everything'),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Clear memory'),
+          content: RadioGroup<String>(
+            groupValue: selected,
+            onChanged: (v) => setDialogState(() => selected = v ?? 'all'),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Choose what to delete. This cannot be undone.'),
+                const SizedBox(height: 8),
+                ..._memScopes.map((s) => RadioListTile<String>(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      value: s.scope,
+                      title: Text(s.label),
+                      subtitle: Text(s.detail,
+                          style: Theme.of(ctx).textTheme.bodySmall),
+                    )),
+              ],
+            ),
           ),
-        ],
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Clear'),
+            ),
+          ],
+        ),
       ),
     );
     if (ok != true) return;
-    final done = await ApiService.purgeMemory(scope: 'all');
+    final done = await ApiService.purgeMemory(scope: selected);
     if (!mounted) return;
     if (done) {
-      showAppMessage(context, 'Memory cleared');
+      showAppMessage(context, selected == 'all' ? 'Memory cleared' : 'Cleared');
+      setState(() {
+        _memGraphEdges = const [];
+        _memGraphLoaded = false;
+      });
       _loadMemory();
     } else {
       showAppMessage(context, 'Failed to clear memory', isError: true);
+    }
+  }
+
+  // ── Personalization ───────────────────────────────────────────────────────
+  Widget _personalizationSection(ThemeData theme) {
+    final s = context.watch<SettingsProvider>();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _header(theme, 'Personalization', 'Make the chat yours'),
+        const SizedBox(height: 6),
+
+        // Live preview — change a slider and watch the real thing move, rather
+        // than guessing and backing out to the chat to check.
+        _PersonalizationPreview(settings: s),
+        const SizedBox(height: 20),
+
+        _sectionLabel(theme, 'Theme'),
+        SegmentedButton<ThemeMode>(
+          segments: const [
+            ButtonSegment(value: ThemeMode.system,
+                label: Text('System'), icon: Icon(Icons.brightness_auto, size: 16)),
+            ButtonSegment(value: ThemeMode.light,
+                label: Text('Light'), icon: Icon(Icons.light_mode_outlined, size: 16)),
+            ButtonSegment(value: ThemeMode.dark,
+                label: Text('Dark'), icon: Icon(Icons.dark_mode_outlined, size: 16)),
+          ],
+          selected: {s.themeMode},
+          showSelectedIcon: false,
+          onSelectionChanged: (v) => s.setThemeMode(v.first),
+        ),
+        const SizedBox(height: 18),
+
+        _sectionLabel(theme, 'Accent colour'),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            for (final c in SettingsProvider.accentChoices)
+              _AccentDot(
+                color: c,
+                selected: c.toARGB32() == s.accent.toARGB32(),
+                onTap: () => s.setAccent(c),
+              ),
+          ],
+        ),
+        const SizedBox(height: 18),
+
+        _slider(
+          theme,
+          label: 'Message text size',
+          value: s.textSize,
+          min: SettingsProvider.minTextSize,
+          max: SettingsProvider.maxTextSize,
+          onChanged: s.previewTextSize,
+          onEnd: (_) => s.commitPreview(),
+        ),
+        _slider(
+          theme,
+          label: 'Message corners',
+          value: s.cornerRadius,
+          min: SettingsProvider.minRadius,
+          max: SettingsProvider.maxRadius,
+          onChanged: s.previewCornerRadius,
+          onEnd: (_) => s.commitPreview(),
+        ),
+        const SizedBox(height: 6),
+
+        _sectionLabel(theme, 'Chat density'),
+        SegmentedButton<ChatDensity>(
+          segments: const [
+            ButtonSegment(value: ChatDensity.comfortable, label: Text('Comfortable')),
+            ButtonSegment(value: ChatDensity.compact, label: Text('Compact')),
+          ],
+          selected: {s.density},
+          showSelectedIcon: false,
+          onSelectionChanged: (v) => s.setDensity(v.first),
+        ),
+        const SizedBox(height: 18),
+
+        _sectionLabel(theme, 'Colour theme'),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Text(
+            'Sets the chat wallpaper and a matching bubble colour. Pick an '
+            'accent above afterwards to override it.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurface.withValues(alpha: 0.6)),
+          ),
+        ),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            for (final w in Wallpaper.values)
+              if (w != Wallpaper.custom)
+                _WallpaperSwatch(
+                  wallpaper: w,
+                  selected: s.wallpaper == w,
+                  onTap: () => s.setWallpaper(w),
+                ),
+            _WallpaperSwatch(
+              wallpaper: Wallpaper.custom,
+              selected: s.wallpaper == Wallpaper.custom,
+              imagePath: s.wallpaperPath,
+              onTap: _pickWallpaper,
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          value: s.reduceAnimations,
+          onChanged: s.setReduceAnimations,
+          title: Text('Reduce animations', style: theme.textTheme.bodyMedium),
+          subtitle: Text(
+              'Turn off motion effects like the typing indicator and smooth '
+              'scrolling.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.6))),
+        ),
+        const SizedBox(height: 12),
+
+        OutlinedButton.icon(
+          onPressed: () async {
+            await context.read<SettingsProvider>().resetToDefaults();
+            if (mounted) showAppMessage(context, 'Reset to defaults');
+          },
+          icon: const Icon(Icons.restart_alt, size: 18),
+          label: const Text('Reset to defaults'),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          'These settings follow your account, so your phone and desktop match. '
+          'A custom wallpaper image stays on this device only.',
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.onSurface.withValues(alpha: 0.6)),
+        ),
+      ],
+    );
+  }
+
+  Widget _slider(ThemeData theme, {
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required ValueChanged<double> onChanged,
+    required ValueChanged<double> onEnd,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(child: Text(label, style: theme.textTheme.bodyMedium)),
+            Text('${value.round()}',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.primary,
+                    fontWeight: FontWeight.w600)),
+          ],
+        ),
+        Slider(
+          value: value.clamp(min, max),
+          min: min,
+          max: max,
+          divisions: (max - min).round(),
+          onChanged: onChanged,
+          onChangeEnd: onEnd,
+        ),
+      ],
+    );
+  }
+
+  /// Pick an image for the chat background. It's copied into the app's own
+  /// directory: the picker hands back a cache/temp path the OS is free to
+  /// delete, which would leave the wallpaper silently blank later.
+  Future<void> _pickWallpaper() async {
+    final s = context.read<SettingsProvider>();
+    try {
+      final picked = await ImagePicker().pickImage(
+          source: ImageSource.gallery, imageQuality: 85, maxWidth: 2000);
+      if (picked == null) return;
+      final dir = await getApplicationSupportDirectory();
+      final dest = File('${dir.path}/chat_wallpaper${p.extension(picked.path)}');
+      await File(picked.path).copy(dest.path);
+      await s.setWallpaper(Wallpaper.custom, path: dest.path);
+    } catch (e) {
+      if (!mounted) return;
+      showAppMessage(context, 'Could not set that image', isError: true);
     }
   }
 
@@ -1481,6 +2041,247 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A miniature chat, so the sliders can be judged against the real thing
+/// instead of a number. Mirrors MessageBubble's geometry (radius + tail, text
+/// size, density gap) — if that widget's shape changes, change this too.
+class _PersonalizationPreview extends StatelessWidget {
+  const _PersonalizationPreview({required this.settings});
+
+  final SettingsProvider settings;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final r = settings.cornerRadius;
+    final tail = r < 4 ? r : 4.0;
+    final gradient = SettingsProvider.gradientFor(settings.wallpaper, isDark);
+
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: theme.scaffoldBackgroundColor,
+        gradient: gradient,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: theme.colorScheme.outline.withValues(alpha: 0.4)),
+      ),
+      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 12 - settings.messageGap),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Assistant
+          Padding(
+            padding: EdgeInsets.symmetric(vertical: settings.messageGap),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surface,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(r),
+                    topRight: Radius.circular(r),
+                    bottomLeft: Radius.circular(tail),
+                    bottomRight: Radius.circular(r),
+                  ),
+                  border: Border.all(
+                      color: theme.colorScheme.outline.withValues(alpha: 0.2)),
+                ),
+                child: Text(
+                  'Here’s how your messages will look.',
+                  style: TextStyle(
+                    fontSize: settings.textSize,
+                    height: 1.6,
+                    color: theme.colorScheme.onSurface,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // User
+          Padding(
+            padding: EdgeInsets.symmetric(vertical: settings.messageGap),
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                decoration: BoxDecoration(
+                  color: settings.accent,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(r),
+                    topRight: Radius.circular(r),
+                    bottomLeft: Radius.circular(r),
+                    bottomRight: Radius.circular(tail),
+                  ),
+                ),
+                child: Text(
+                  'Looks good \u{1F44B}',
+                  style: TextStyle(
+                    color: Colors.white,
+                    height: 1.5,
+                    fontSize: settings.textSize,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AccentDot extends StatelessWidget {
+  const _AccentDot({
+    required this.color,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final Color color;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      onTap: onTap,
+      customBorder: const CircleBorder(),
+      child: Container(
+        width: 34,
+        height: 34,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(
+            // Ring the selection in the page's own foreground rather than the
+            // swatch colour, so it reads on every hue.
+            color: selected
+                ? theme.colorScheme.onSurface
+                : Colors.transparent,
+            width: 2,
+          ),
+        ),
+        child: selected
+            ? const Icon(Icons.check, size: 16, color: Colors.white)
+            : null,
+      ),
+    );
+  }
+}
+
+class _WallpaperSwatch extends StatelessWidget {
+  const _WallpaperSwatch({
+    required this.wallpaper,
+    required this.selected,
+    required this.onTap,
+    this.imagePath,
+  });
+
+  final Wallpaper wallpaper;
+  final bool selected;
+  final VoidCallback onTap;
+  final String? imagePath;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final gradient = SettingsProvider.gradientFor(wallpaper, isDark);
+    final isCustom = wallpaper == Wallpaper.custom;
+    final hasImage = (imagePath ?? '').isNotEmpty && File(imagePath!).existsSync();
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            width: 52,
+            height: 66,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: theme.scaffoldBackgroundColor,
+              gradient: gradient,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: selected
+                    ? theme.colorScheme.primary
+                    : theme.colorScheme.outline.withValues(alpha: 0.5),
+                width: selected ? 2 : 1,
+              ),
+            ),
+            child: isCustom && hasImage
+                ? Image.file(File(imagePath!), fit: BoxFit.cover)
+                : isCustom
+                    ? Icon(Icons.add_photo_alternate_outlined,
+                        size: 20,
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6))
+                    // Two mini bubbles in the theme's paired accent, so the
+                    // background AND the bubble colour you're choosing are both
+                    // visible before you tap — the pairing is the whole point.
+                    : _MiniBubbles(accent: SettingsProvider.accentFor(wallpaper)),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(SettingsProvider.labelFor(wallpaper),
+            style: theme.textTheme.labelSmall?.copyWith(
+                color: selected
+                    ? theme.colorScheme.primary
+                    : theme.colorScheme.onSurface.withValues(alpha: 0.6))),
+      ],
+    );
+  }
+}
+
+/// The bubble pair drawn inside a colour-theme swatch: an incoming bubble in
+/// the surface colour and an outgoing one in that theme's accent — a tiny
+/// version of what the chat will actually look like.
+class _MiniBubbles extends StatelessWidget {
+  const _MiniBubbles({required this.accent});
+
+  final Color? accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 10),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 24,
+            height: 9,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(
+                  color: theme.colorScheme.outline.withValues(alpha: 0.5),
+                  width: 0.5),
+            ),
+          ),
+          const SizedBox(height: 5),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Container(
+              width: 24,
+              height: 9,
+              decoration: BoxDecoration(
+                color: accent ?? theme.colorScheme.primary,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

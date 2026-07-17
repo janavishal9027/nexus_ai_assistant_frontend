@@ -2,19 +2,25 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 class AppTheme {
-  static ThemeData get darkTheme {
+  /// The brand teal — the default accent, and the fallback everywhere.
+  static const Color defaultAccent = Color(0xFF10A37F);
+
+  /// Dark theme, tinted by the user's chosen [accent] (Settings →
+  /// Personalization). Kept as a function rather than a getter so the accent
+  /// can vary; callers that don't care can omit it.
+  static ThemeData dark({Color accent = defaultAccent}) {
     return ThemeData(
       // Material 3 across every platform (desktop, Android, iOS, web).
       useMaterial3: true,
       brightness: Brightness.dark,
       scaffoldBackgroundColor: const Color(0xFF0D0D0D),
-      primaryColor: const Color(0xFF10A37F),
-      colorScheme: const ColorScheme.dark(
-        primary: Color(0xFF10A37F),
-        secondary: Color(0xFF10A37F),
-        surface: Color(0xFF171717),
-        onSurface: Color(0xFFECECEC),
-        outline: Color(0xFF2D2D2D),
+      primaryColor: accent,
+      colorScheme: ColorScheme.dark(
+        primary: accent,
+        secondary: accent,
+        surface: const Color(0xFF171717),
+        onSurface: const Color(0xFFECECEC),
+        outline: const Color(0xFF2D2D2D),
       ),
       textTheme: GoogleFonts.interTextTheme(
         ThemeData.dark().textTheme,
@@ -33,7 +39,7 @@ class AppTheme {
         behavior: SnackBarBehavior.floating,
         backgroundColor: const Color(0xFF212121),
         contentTextStyle: const TextStyle(color: Color(0xFFECECEC)),
-        actionTextColor: const Color(0xFF10A37F),
+        actionTextColor: accent,
         elevation: 6,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
@@ -51,19 +57,21 @@ class AppTheme {
     );
   }
 
-  static ThemeData get lightTheme {
+  /// Light theme, tinted by [accent]. Note this was dead code until the
+  /// Personalization section shipped — `themeMode` was pinned to dark.
+  static ThemeData light({Color accent = defaultAccent}) {
     return ThemeData(
       // Material 3 across every platform (desktop, Android, iOS, web).
       useMaterial3: true,
       brightness: Brightness.light,
       scaffoldBackgroundColor: Colors.white,
-      primaryColor: const Color(0xFF10A37F),
-      colorScheme: const ColorScheme.light(
-        primary: Color(0xFF10A37F),
-        secondary: Color(0xFF10A37F),
-        surface: Color(0xFFF7F7F8),
-        onSurface: Color(0xFF1A1A1A),
-        outline: Color(0xFFE5E5E5),
+      primaryColor: accent,
+      colorScheme: ColorScheme.light(
+        primary: accent,
+        secondary: accent,
+        surface: const Color(0xFFF7F7F8),
+        onSurface: const Color(0xFF1A1A1A),
+        outline: const Color(0xFFE5E5E5),
       ),
       textTheme: GoogleFonts.interTextTheme(
         ThemeData.light().textTheme,
@@ -80,7 +88,7 @@ class AppTheme {
         behavior: SnackBarBehavior.floating,
         backgroundColor: const Color(0xFF323232),
         contentTextStyle: const TextStyle(color: Colors.white),
-        actionTextColor: const Color(0xFF10A37F),
+        actionTextColor: accent,
         elevation: 6,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),

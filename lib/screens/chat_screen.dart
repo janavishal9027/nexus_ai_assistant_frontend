@@ -1,11 +1,15 @@
+import 'dart:io' show File;
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
+import '../providers/settings_provider.dart';
+import '../services/api_service.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/clarify_panel.dart';
-import '../widgets/backend_status_indicator.dart';
+import '../widgets/connectivity_indicator.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/resize_handle.dart';
 import '../models/project.dart';
@@ -64,6 +68,11 @@ class _ChatScreenState extends State<ChatScreen> {
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
+        // Jump instead of glide when the user asked for less motion.
+        if (context.read<SettingsProvider>().reduceAnimations) {
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+          return;
+        }
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
           duration: const Duration(milliseconds: 200),
@@ -234,13 +243,15 @@ class _ChatScreenState extends State<ChatScreen> {
         _buildTopBar(context, theme, isWide, chatProvider),
         // Divider
         Divider(height: 1, color: theme.colorScheme.outline.withValues(alpha: 0.3)),
-        // Messages
+        // Messages, over the chosen chat wallpaper (Settings → Personalization).
         Expanded(
-          child: noKeys
-              ? _buildNoKeysState(theme)
-              : chatProvider.messages.isEmpty
-                  ? _buildEmptyState(theme)
-                  : _buildMessageList(chatProvider),
+          child: _ChatBackground(
+            child: noKeys
+                ? _buildNoKeysState(theme)
+                : chatProvider.messages.isEmpty
+                    ? _buildEmptyState(theme)
+                    : _buildMessageList(chatProvider),
+          ),
         ),
         // Error display (hidden while locked — the onboarding covers it)
         if (!noKeys && chatProvider.error != null)
@@ -405,10 +416,11 @@ class _ChatScreenState extends State<ChatScreen> {
           // Sole flex child: eats all remaining space so the trailing
           // badge + settings sit flush against the top-right corner.
           const Spacer(),
-          // Live backend status (A.6): unreachable / restarting / degraded / online.
+          // Device connectivity (green Online / red Offline) — shown on every
+          // platform, so mobile matches desktop.
           const Padding(
             padding: EdgeInsets.only(right: 8),
-            child: BackendStatusIndicator(),
+            child: ConnectivityIndicator(),
           ),
           // Provider badge
           if (chatProvider.currentPlatform != null)
@@ -787,31 +799,10 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           const SizedBox(height: 32),
-          // Suggestion chips
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            alignment: WrapAlignment.center,
-            children: [
-              _SuggestionChip(
-                icon: Icons.code,
-                label: 'Write a Python script',
-                onTap: () => context.read<ChatProvider>().sendMessage(
-                    'Write a Python script that generates a random password'),
-              ),
-              _SuggestionChip(
-                icon: Icons.lightbulb_outline,
-                label: 'Explain something',
-                onTap: () => context.read<ChatProvider>().sendMessage(
-                    'Explain quantum computing in simple terms'),
-              ),
-              _SuggestionChip(
-                icon: Icons.edit_note,
-                label: 'Help me write',
-                onTap: () => context.read<ChatProvider>().sendMessage(
-                    'Help me write a professional email to request time off'),
-              ),
-            ],
+          // Dynamic, LLM-generated suggestion chips — refreshed per new chat
+          // (keyed on the provider's newChatNonce so a fresh set loads each time).
+          _StarterChips(
+            key: ValueKey(context.watch<ChatProvider>().newChatNonce),
           ),
         ],
         ),
@@ -835,6 +826,128 @@ class _ChatScreenState extends State<ChatScreen> {
           onEdit: msg.role == 'user' ? chatProvider.editAndResend : null,
         );
       },
+    );
+  }
+}
+
+/// Paints the chat wallpaper behind the message list (Settings →
+/// Personalization). Built-ins are gradients — no assets, and they adapt to
+/// light/dark. A custom image is device-local; if its file has gone (deleted,
+/// or the setting synced from another device) this falls back to no wallpaper
+/// rather than showing a broken image.
+class _ChatBackground extends StatelessWidget {
+  const _ChatBackground({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = context.watch<SettingsProvider>();
+    if (!s.hasWallpaper) return child;
+
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    if (s.wallpaper == Wallpaper.custom) {
+      final path = s.wallpaperPath;
+      if (path == null || !File(path).existsSync()) return child;
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          Image.file(File(path), fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+          // Keep bubbles legible over an arbitrary photo.
+          Container(
+            color: (isDark ? Colors.black : Colors.white).withValues(alpha: 0.45),
+          ),
+          child,
+        ],
+      );
+    }
+
+    final gradient = SettingsProvider.gradientFor(s.wallpaper, isDark);
+    if (gradient == null) return child;
+    return DecoratedBox(
+      decoration: BoxDecoration(gradient: gradient),
+      child: child,
+    );
+  }
+}
+
+/// Empty-state starter chips. On mount it asks the backend for 3 fresh,
+/// LLM-generated starters (a current-tech/coding task, a globally-relevant
+/// idea, a writing task) tailored per new chat. Shows a sensible default set
+/// while loading / on failure so chips are always present.
+class _StarterChips extends StatefulWidget {
+  const _StarterChips({super.key});
+
+  @override
+  State<_StarterChips> createState() => _StarterChipsState();
+}
+
+class _StarterChipsState extends State<_StarterChips> {
+  // Shown immediately while the dynamic set loads (and if the fetch fails).
+  static const List<Map<String, String>> _defaults = [
+    {
+      'category': 'code',
+      'label': 'Build a REST API',
+      'prompt':
+          'Show me how to build a small REST API with one CRUD endpoint, with runnable code.'
+    },
+    {
+      'category': 'idea',
+      'label': 'Fresh ideas',
+      'prompt':
+          'Brainstorm 5 fresh ideas relevant to what is trending in the world right now.'
+    },
+    {
+      'category': 'write',
+      'label': 'Help me write',
+      'prompt': 'Help me write a clear, professional email.'
+    },
+  ];
+
+  List<Map<String, String>> _items = _defaults;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final model = context.read<ChatProvider>().selectedModel;
+    final items = await ApiService.getStarters(model: model);
+    if (!mounted || items.length < 3) return;
+    setState(() => _items = items.take(3).toList());
+  }
+
+  IconData _iconFor(String category) {
+    switch (category) {
+      case 'code':
+        return Icons.code;
+      case 'write':
+        return Icons.edit_note;
+      case 'idea':
+      default:
+        return Icons.lightbulb_outline;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      alignment: WrapAlignment.center,
+      children: [
+        for (final it in _items)
+          _SuggestionChip(
+            icon: _iconFor(it['category'] ?? 'idea'),
+            label: it['label'] ?? '',
+            onTap: () =>
+                context.read<ChatProvider>().sendMessage(it['prompt'] ?? ''),
+          ),
+      ],
     );
   }
 }

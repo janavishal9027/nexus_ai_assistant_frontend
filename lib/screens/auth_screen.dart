@@ -85,7 +85,7 @@ class _AuthScreenState extends State<AuthScreen> {
                   if (!_isLogin) ...[
                     FTextFormField(
                       control: FTextFieldControl.managed(controller: _nameCtrl),
-                      label: const Text('Name (optional)'),
+                      label: const Text('Name'),
                       hint: 'Your name',
                       textInputAction: TextInputAction.next,
                     ),

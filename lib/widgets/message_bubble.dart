@@ -13,6 +13,7 @@ import 'package:provider/provider.dart';
 import '../models/conversation.dart';
 import '../models/chat_attachment.dart';
 import '../providers/chat_provider.dart';
+import '../providers/settings_provider.dart';
 import '../services/api_service.dart';
 import '../services/exporter.dart';
 
@@ -431,9 +432,11 @@ class _MessageBubbleState extends State<MessageBubble> {
   Widget build(BuildContext context) {
     final isUser = message.role == 'user';
     final theme = Theme.of(context);
+    // Personalization: message gap follows the chat-density setting.
+    final gap = context.watch<SettingsProvider>().messageGap;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      padding: EdgeInsets.symmetric(horizontal: 16, vertical: gap),
       // Center the conversation in a fixed-width reading column so lines don't
       // stretch the full window width (keeps text comfortably readable).
       child: Center(
@@ -517,8 +520,27 @@ class _MessageBubbleState extends State<MessageBubble> {
     );
   }
 
+  /// The user's bubble radius, and the small "tail" corner nearest the avatar.
+  /// The tail tracks the main radius so a fully-square setting is actually
+  /// square, instead of leaving one rounded corner behind.
+  (BorderRadius, double) _userRadius(BuildContext context) {
+    final r = context.watch<SettingsProvider>().cornerRadius;
+    final tail = r < 4 ? r : 4.0;
+    return (
+      BorderRadius.only(
+        topLeft: Radius.circular(r),
+        topRight: Radius.circular(r),
+        bottomLeft: Radius.circular(r),
+        bottomRight: Radius.circular(tail),
+      ),
+      r,
+    );
+  }
+
   Widget _userBubble(ThemeData theme) {
     final primary = theme.colorScheme.primary;
+    final settings = context.watch<SettingsProvider>();
+    final (radius, r) = _userRadius(context);
     return MouseRegion(
       onEnter: (_) => setState(() => _hovering = true),
       onExit: (_) => setState(() => _hovering = false),
@@ -534,12 +556,7 @@ class _MessageBubbleState extends State<MessageBubble> {
               padding: const EdgeInsets.fromLTRB(14, 10, 30, 10),
               decoration: BoxDecoration(
                 color: primary,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(16),
-                  topRight: Radius.circular(16),
-                  bottomLeft: Radius.circular(16),
-                  bottomRight: Radius.circular(4),
-                ),
+                borderRadius: radius,
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
@@ -550,7 +567,15 @@ class _MessageBubbleState extends State<MessageBubble> {
                   if (message.content.isNotEmpty)
                     Text(
                       message.content,
-                      style: const TextStyle(color: Colors.white, height: 1.5),
+                      // fontSize is explicit: this Text inherits DefaultTextStyle
+                      // rather than textTheme, so without it the size setting
+                      // would scale the assistant's markdown and not the user's
+                      // own messages.
+                      style: TextStyle(
+                        color: Colors.white,
+                        height: 1.5,
+                        fontSize: settings.textSize,
+                      ),
                     ),
                 ],
               ),
@@ -583,8 +608,10 @@ class _MessageBubbleState extends State<MessageBubble> {
                             primary.withValues(alpha: 0.0),
                           ],
                         ),
-                        borderRadius: const BorderRadius.only(
-                          topRight: Radius.circular(16),
+                        // Tracks the bubble's radius — a fixed 16 here would
+                        // overhang the corner once the radius is configurable.
+                        borderRadius: BorderRadius.only(
+                          topRight: Radius.circular(r),
                         ),
                       ),
                       child: const Icon(
@@ -723,15 +750,17 @@ class _MessageBubbleState extends State<MessageBubble> {
 
   // ── Assistant message: content + copy + model footer (unchanged) ────────
   Widget _assistantBubble(ThemeData theme) {
+    final r = context.watch<SettingsProvider>().cornerRadius;
+    final tail = r < 4 ? r : 4.0;   // mirrored tail; see _userRadius
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
         color: theme.colorScheme.surface,
-        borderRadius: const BorderRadius.only(
-          topLeft: Radius.circular(16),
-          topRight: Radius.circular(16),
-          bottomLeft: Radius.circular(4),
-          bottomRight: Radius.circular(16),
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(r),
+          topRight: Radius.circular(r),
+          bottomLeft: Radius.circular(tail),
+          bottomRight: Radius.circular(r),
         ),
         border: Border.all(color: theme.colorScheme.outline.withValues(alpha: 0.2)),
       ),
@@ -749,6 +778,7 @@ class _MessageBubbleState extends State<MessageBubble> {
           // Requested downloads (A.4): one-click buttons for the format(s) the
           // user asked for — the document is right here, no Export menu needed.
           if (!message.isStreaming &&
+              !message.stopped &&
               message.content.isNotEmpty &&
               (message.downloadFormats?.isNotEmpty ?? false))
             _downloadButtons(theme),
@@ -943,6 +973,7 @@ class _MarkdownText extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final textSize = context.watch<SettingsProvider>().textSize;
 
     return MarkdownBody(
       data: data,
@@ -951,6 +982,7 @@ class _MarkdownText extends StatelessWidget {
         p: theme.textTheme.bodyMedium?.copyWith(
           height: 1.6,
           color: theme.colorScheme.onSurface,
+          fontSize: textSize,
         ),
         // Inline `code` — neutral, readable pill.
         code: TextStyle(
@@ -1266,7 +1298,13 @@ class _TypingIndicatorState extends State<_TypingIndicator>
     _controller = AnimationController(
       duration: const Duration(milliseconds: 1500),
       vsync: this,
-    )..repeat();
+    );
+    // The dots only pulse when motion is wanted; the elapsed-seconds counter
+    // below still runs, so "reduce animations" never costs the user their only
+    // signal that something is happening.
+    if (!context.read<SettingsProvider>().reduceAnimations) {
+      _controller.repeat();
+    }
     // Tick once a second so the user sees progress (not a frozen UI) while the
     // provider is slow to send its first token.
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {

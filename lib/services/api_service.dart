@@ -305,6 +305,56 @@ class ApiService {
     return [];
   }
 
+  /// Fresh, LLM-generated conversation starters for the new-chat empty state.
+  /// Each is {category: code|idea|write, label, prompt}. Fails open to [].
+  static Future<List<Map<String, String>>> getStarters({String? model}) async {
+    try {
+      final q = (model != null && model.isNotEmpty && model != 'auto')
+          ? '?model=${Uri.encodeQueryComponent(model)}'
+          : '';
+      final r = await http.get(
+        Uri.parse('$_baseUrl/api/chat/starters$q'),
+        headers: _headers(json: false),
+      );
+      if (r.statusCode == 200) {
+        final list = (_tryJson(r.body)['starters'] as List?) ?? [];
+        return list
+            .whereType<Map>()
+            .map((e) => {
+                  'category': (e['category'] ?? 'idea').toString(),
+                  'label': (e['label'] ?? '').toString(),
+                  'prompt': (e['prompt'] ?? '').toString(),
+                })
+            .where((m) => m['label']!.isNotEmpty && m['prompt']!.isNotEmpty)
+            .toList();
+      }
+    } catch (_) {/* fail open */}
+    return [];
+  }
+
+  /// This account's appearance settings, for matching a second device.
+  /// Null on any failure — the caller keeps its local settings.
+  static Future<Map<String, dynamic>?> getAppearance() async {
+    try {
+      final r = await http.get(Uri.parse('$_baseUrl/api/settings/appearance'),
+          headers: _headers(json: false));
+      if (r.statusCode == 200) return _tryJson(r.body);
+    } catch (_) {/* fail open — appearance is local-first */}
+    return null;
+  }
+
+  /// Push appearance settings so other devices match. Fire-and-forget: the
+  /// local write already happened, so a failure here must stay silent.
+  static Future<void> setAppearance(Map<String, dynamic> updates) async {
+    try {
+      await http.patch(
+        Uri.parse('$_baseUrl/api/settings/appearance'),
+        headers: _headers(),
+        body: jsonEncode(updates),
+      );
+    } catch (_) {/* fail open */}
+  }
+
   /// Persist a 👍/👎 on an assistant message (Part D memory — the Reflector
   /// learns what lands). rating: +1 up, -1 down, 0 clears. Fails open.
   static Future<void> submitFeedback({
@@ -338,7 +388,8 @@ class ApiService {
     return {};
   }
 
-  /// Full memory export (episodic + skills + feedback) as JSON. Null on failure.
+  /// Full memory export (episodic + skills + feedback + personal graph) as
+  /// JSON. Null on failure.
   static Future<Map<String, dynamic>?> exportMemory() async {
     try {
       final r = await http.get(Uri.parse('$_baseUrl/api/memory/export'), headers: _headers());
@@ -347,11 +398,76 @@ class ApiService {
     return null;
   }
 
-  /// Clear the user's memory. scope ∈ {all, episodic, skills, feedback}.
+  /// Clear the user's memory.
+  /// scope ∈ {all, episodic, skills, feedback, graph, knowledge}.
+  /// 'all' wipes every layer, both graphs included.
   static Future<bool> purgeMemory({String scope = 'all'}) async {
     try {
       final r = await http.delete(Uri.parse('$_baseUrl/api/memory?scope=$scope'),
           headers: _headers());
+      return r.statusCode == 200;
+    } catch (_) {/* fail open */}
+    return false;
+  }
+
+  /// The user's memory switches: {recall,record,reflect,graph}_enabled.
+  /// Fails open to all-on (matching the backend default).
+  static Future<Map<String, bool>> getMemoryPrefs() async {
+    try {
+      final r = await http.get(Uri.parse('$_baseUrl/api/memory/prefs'),
+          headers: _headers());
+      if (r.statusCode == 200) {
+        final p = _tryJson(r.body)['prefs'];
+        if (p is Map) {
+          return p.map((k, v) => MapEntry(k.toString(), v == true));
+        }
+      }
+    } catch (_) {/* fail open */}
+    return const {
+      'recall_enabled': true,
+      'record_enabled': true,
+      'reflect_enabled': true,
+      'graph_enabled': true,
+    };
+  }
+
+  /// Turn memory layers on/off. Partial — only the keys passed are changed.
+  /// Returns the stored switches, or null if the save failed.
+  static Future<Map<String, bool>?> setMemoryPrefs(Map<String, bool> updates) async {
+    try {
+      final r = await http.patch(
+        Uri.parse('$_baseUrl/api/memory/prefs'),
+        headers: _headers(),
+        body: jsonEncode(updates),
+      );
+      if (r.statusCode == 200) {
+        final p = _tryJson(r.body)['prefs'];
+        if (p is Map) {
+          return p.map((k, v) => MapEntry(k.toString(), v == true));
+        }
+      }
+    } catch (_) {/* fail open */}
+    return null;
+  }
+
+  /// The personal memory graph (people/orgs + tools/tech), strongest first.
+  /// Returns the raw {nodes, edges} payload; empty on failure.
+  static Future<Map<String, dynamic>> getMemoryGraph({int limit = 300}) async {
+    try {
+      final r = await http.get(
+          Uri.parse('$_baseUrl/api/memory/graph?limit=$limit'),
+          headers: _headers());
+      if (r.statusCode == 200) return _tryJson(r.body);
+    } catch (_) {/* fail open */}
+    return const {'nodes': [], 'edges': []};
+  }
+
+  /// Forget a single memory-graph edge. True when it was deleted.
+  static Future<bool> deleteMemoryEdge(int edgeId) async {
+    try {
+      final r = await http.delete(
+          Uri.parse('$_baseUrl/api/memory/graph/$edgeId'),
+          headers: _headers(json: false));
       return r.statusCode == 200;
     } catch (_) {/* fail open */}
     return false;
@@ -625,6 +741,25 @@ class ApiService {
 
   static Future<void> deleteKey(int id) async {
     await http.delete(Uri.parse('$_baseUrl/api/keys/$id'), headers: _headers(json: false));
+  }
+
+  /// Probe a key against its provider and record the result.
+  /// Returns {ok: bool, status: String, error: String?}. Fails closed (ok:false)
+  /// so a network problem never reports a key as working.
+  static Future<Map<String, dynamic>> testKey(int id) async {
+    try {
+      final r = await http.post(Uri.parse('$_baseUrl/api/keys/$id/test'),
+          headers: _headers(json: false));
+      final body = _tryJson(r.body);
+      if (r.statusCode == 200) return body;
+      return {
+        'ok': false,
+        'status': 'unknown',
+        'error': (body['detail'] ?? 'Key check failed').toString(),
+      };
+    } catch (e) {
+      return {'ok': false, 'status': 'unknown', 'error': 'Could not reach the server'};
+    }
   }
 
   // ─── Knowledge Base (RAG) ─────────────────────────────────────────────

@@ -32,6 +32,9 @@ class ChatProvider extends ChangeNotifier {
   String? _currentModel;
   String? _currentPlatform;
   String _selectedModel = 'auto';
+  // Bumped whenever a fresh chat opens, so the empty-state starter chips
+  // re-fetch a new dynamic set per new chat (used as their widget key).
+  int _newChatNonce = 0;
   // Deep Research mode: routes only to large (>=400B) models and always
   // gathers live web context for a thorough, cited answer.
   bool _deepResearch = false;
@@ -83,6 +86,7 @@ class ChatProvider extends ChangeNotifier {
   String? get currentModel => _currentModel;
   String? get currentPlatform => _currentPlatform;
   String get selectedModel => _selectedModel;
+  int get newChatNonce => _newChatNonce;
   bool get deepResearch => _deepResearch;
   bool get webSearch => _webSearch;
 
@@ -242,6 +246,7 @@ class ChatProvider extends ChangeNotifier {
     for (var i = 0; i < msgs.length; i++) {
       final m = msgs[i];
       if (m.role == 'assistant' &&
+          !m.stopped &&
           m.content.trim().isNotEmpty &&
           i > 0 &&
           msgs[i - 1].role == 'user') {
@@ -264,6 +269,7 @@ class ChatProvider extends ChangeNotifier {
     _currentModel = null;
     _currentPlatform = null;
     _error = null;
+    _newChatNonce++;   // refresh the empty-state starter chips
     notifyListeners();
   }
 
@@ -673,8 +679,13 @@ class ChatProvider extends ChangeNotifier {
     } catch (e) {
       if (_stopped) {
         // User cancelled: keep whatever streamed so far, drop an empty bubble.
+        // Mark it stopped so no download/document is offered for a partial answer.
         if (buffer.isNotEmpty) {
           updateAssistant(streaming: false);
+          if (assistantIndex < ownMessages.length) {
+            ownMessages[assistantIndex] =
+                ownMessages[assistantIndex].copyWith(stopped: true);
+          }
         } else if (assistantIndex < ownMessages.length &&
             ownMessages[assistantIndex].role == 'assistant') {
           ownMessages.removeAt(assistantIndex);

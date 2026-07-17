@@ -28,6 +28,12 @@ dependencies:
   file_selector: ^1.1.0
   image_picker: ^1.2.3
   share_plus: ^13.2.1
+  connectivity_plus: ^7.3.0
+  # A stable app-owned directory to copy a chosen chat wallpaper into: the
+  # picker returns a cache path the OS may reclaim, which would blank the
+  # wallpaper later with no obvious cause.
+  path_provider: ^2.1.5
+  path: ^1.9.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

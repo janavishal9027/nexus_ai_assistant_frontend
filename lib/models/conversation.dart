@@ -75,6 +75,9 @@ class Message {
   // bubble shows a one-click download button for each. Set only on freshly
   // generated answers whose request named a downloadable format.
   final List<String>? downloadFormats;
+  // True when the user stopped this assistant turn mid-stream (partial answer).
+  // A stopped answer is never offered as a downloadable document.
+  final bool stopped;
 
   Message({
     required this.role,
@@ -85,6 +88,7 @@ class Message {
     this.activity,
     this.attachments,
     this.downloadFormats,
+    this.stopped = false,
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
@@ -93,6 +97,7 @@ class Message {
       content: json['content']?.toString() ?? '',
       model: json['model']?.toString(),
       platform: json['platform']?.toString(),
+      stopped: json['stopped'] == true,
     );
   }
 
@@ -112,6 +117,7 @@ class Message {
     AgentActivity? activity,
     List<ChatAttachment>? attachments,
     List<String>? downloadFormats,
+    bool? stopped,
   }) {
     return Message(
       role: role ?? this.role,
@@ -122,6 +128,7 @@ class Message {
       activity: activity ?? this.activity,
       attachments: attachments ?? this.attachments,
       downloadFormats: downloadFormats ?? this.downloadFormats,
+      stopped: stopped ?? this.stopped,
     );
   }
 }
